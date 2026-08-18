@@ -13,14 +13,11 @@ LINE_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_USER_ID = os.getenv("LINE_USER_ID")  # 自分専用のユーザーID
 
 def init_db():
-    """データベースの初期化（一度テーブルをクリアして確実に最新構造にする）"""
+    """データベースの初期化"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    
-    # 既存の不整合データをリセットするため、一度テーブルをリセット
-    cursor.execute('DROP TABLE IF EXISTS notified_products')
     cursor.execute('''
-        CREATE TABLE notified_products (
+        CREATE TABLE IF NOT EXISTS notified_products (
             item_key TEXT PRIMARY KEY,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
@@ -45,13 +42,10 @@ def save_notified(item_key):
     conn.commit()
     conn.close()
 
-def send_line_notification(title, url_link):
-    """指定したユーザーIDのみへ個別通知（Push Message）を送信"""
-    if not LINE_ACCESS_TOKEN:
-        print("エラー: LINE_CHANNEL_ACCESS_TOKEN が設定されていません。")
-        return
-    if not LINE_USER_ID:
-        print("エラー: LINE_USER_ID が設定されていません。")
+def send_combined_line_notification(new_items):
+    """複数の新規入荷情報を1通のLINEメッセージにまとめて送信"""
+    if not LINE_ACCESS_TOKEN or not LINE_USER_ID:
+        print("エラー: LINEアクセストークンまたはユーザーIDが設定されていません。")
         return
 
     api_url = "https://api.line.me/v2/bot/message/push"
@@ -60,10 +54,17 @@ def send_line_notification(title, url_link):
         "Authorization": f"Bearer {LINE_ACCESS_TOKEN}"
     }
     
-    message_text = f"【トラウトアイランド 新入荷・在庫更新】\n{title}"
-    if url_link and url_link != TARGET_URL:
-        message_text += f"\n\n{url_link}"
+    # メッセージ作成
+    message_text = "【トラウトアイランド 新入荷・更新情報】\n"
+    for title, url_link in new_items:
+        message_text += f"\n・{title}"
+        if url_link and url_link != TARGET_URL:
+            message_text += f"\n  {url_link}"
     
+    # LINE送信文字数上限（5000文字）に配慮してカット
+    if len(message_text) > 4500:
+        message_text = message_text[:4500] + "\n...(以下省略)"
+
     payload = {
         "to": LINE_USER_ID,
         "messages": [
@@ -73,15 +74,18 @@ def send_line_notification(title, url_link):
             }
         ]
     }
+    
     response = requests.post(api_url, headers=headers, json=payload)
     if response.status_code == 200:
-        print(f"送信成功（自分のみ）: {title}")
+        print(f"送信成功（まとめ送信 {len(new_items)}件）")
+        for title, _ in new_items:
+            save_notified(title)
     else:
         print(f"送信失敗 [{response.status_code}]: {response.text}")
 
 def main():
     init_db()
-    print("トラウトアイランドの巡回チェック（自分専用テストモード）を開始します...")
+    print("トラウトアイランドの巡回チェックを開始します...")
 
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -95,18 +99,13 @@ def main():
         return
 
     soup = BeautifulSoup(response.text, "html.parser")
-    
     extracted_items = []
     
-    # ページ内のリンク・テキスト要素から更新情報を細かく分解して抽出
     for a_tag in soup.find_all("a", href=True):
         text = a_tag.get_text(strip=True)
         href = a_tag["href"]
-        
-        # 8/18 などの日付付きテキスト、または特定キーワードが含まれる要素を抽出
         if re.search(r'\d{1,2}/\d{1,2}', text) or any(kw in text for kw in ["新入荷", "再入荷", "新色", "在庫更新", "ご予約"]):
             full_url = requests.compat.urljoin(TARGET_URL, href)
-            # 全体ブロックではなく、改行ごとに分割して個別に扱う
             for line in text.splitlines():
                 line = line.strip()
                 if line:
@@ -115,6 +114,8 @@ def main():
     print(f"抽出された更新情報件数: {len(extracted_items)}件")
 
     seen = set()
+    items_to_notify = []
+    
     for title, url_link in extracted_items:
         if title in seen:
             continue
@@ -122,10 +123,14 @@ def main():
         
         if not is_notified(title):
             print(f"新規検知: {title}")
-            send_line_notification(title, url_link)
-            save_notified(title)
+            items_to_notify.append((title, url_link))
         else:
             print(f"スキップ（通知済み）: {title}")
+
+    if items_to_notify:
+        send_combined_line_notification(items_to_notify)
+    else:
+        print("新しい更新情報はありませんでした。")
 
 if __name__ == "__main__":
     main()
