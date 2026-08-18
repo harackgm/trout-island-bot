@@ -13,44 +13,35 @@ LINE_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_USER_ID = os.getenv("LINE_USER_ID")  # 自分専用のユーザーID
 
 def init_db():
-    """データベースの移行・マイグレーション"""
+    """データベースの初期化（一度テーブルをクリアして確実に最新構造にする）"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
+    # 既存の不整合データをリセットするため、一度テーブルをリセット
+    cursor.execute('DROP TABLE IF EXISTS notified_products')
     cursor.execute('''
-        CREATE TABLE IF NOT EXISTS notified_products (
+        CREATE TABLE notified_products (
             item_key TEXT PRIMARY KEY,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
-    
-    cursor.execute("PRAGMA table_info(notified_products)")
-    columns = [column[1] for column in cursor.fetchall()]
-    
-    if "item_key" not in columns:
-        cursor.execute("ALTER TABLE notified_products ADD COLUMN item_key TEXT")
-        cursor.execute("UPDATE notified_products SET item_key = url WHERE item_key IS NULL")
-    
     conn.commit()
     conn.close()
 
-def is_notified(item_key, url):
+def is_notified(item_key):
     """通知済みか確認"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute('SELECT 1 FROM notified_products WHERE item_key = ? OR url = ?', (item_key, url))
+    cursor.execute('SELECT 1 FROM notified_products WHERE item_key = ?', (item_key,))
     result = cursor.fetchone()
     conn.close()
     return result is not None
 
-def save_notified(item_key, url):
-    """通知済みキーおよびURLとして保存"""
+def save_notified(item_key):
+    """通知済みキーとして保存"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    try:
-        cursor.execute('INSERT OR IGNORE INTO notified_products (item_key, url) VALUES (?, ?)', (item_key, url))
-    except sqlite3.OperationalError:
-        cursor.execute('INSERT OR IGNORE INTO notified_products (item_key) VALUES (?)', (item_key,))
+    cursor.execute('INSERT OR IGNORE INTO notified_products (item_key) VALUES (?)', (item_key,))
     conn.commit()
     conn.close()
 
@@ -105,41 +96,34 @@ def main():
 
     soup = BeautifulSoup(response.text, "html.parser")
     
-    # ページ内のすべての行・要素から日付またはキーワードを含む文言を抽出
     extracted_items = []
     
-    # 1. リンク付き要素の検証
+    # ページ内のリンク・テキスト要素から更新情報を細かく分解して抽出
     for a_tag in soup.find_all("a", href=True):
         text = a_tag.get_text(strip=True)
         href = a_tag["href"]
+        
+        # 8/18 などの日付付きテキスト、または特定キーワードが含まれる要素を抽出
         if re.search(r'\d{1,2}/\d{1,2}', text) or any(kw in text for kw in ["新入荷", "再入荷", "新色", "在庫更新", "ご予約"]):
             full_url = requests.compat.urljoin(TARGET_URL, href)
-            extracted_items.append((text, full_url))
-
-    # 2. テキストのみ（リンク無し）要素の検証
-    for element in soup.find_all(["td", "div", "p", "li"]):
-        # 直下のテキストを取得
-        text = element.get_text(strip=True)
-        if re.search(r'\d{1,2}/\d{1,2}\s+\S+', text):
-            # 長すぎる全体ブロックを除外するため、100文字以内の行のみ抽出
-            lines = [line.strip() for line in text.splitlines() if line.strip()]
-            for line in lines:
-                if re.search(r'\d{1,2}/\d{1,2}', line) and len(line) < 80:
-                    extracted_items.append((line, TARGET_URL))
+            # 全体ブロックではなく、改行ごとに分割して個別に扱う
+            for line in text.splitlines():
+                line = line.strip()
+                if line:
+                    extracted_items.append((line, full_url))
 
     print(f"抽出された更新情報件数: {len(extracted_items)}件")
 
-    # 重複を除去して処理
     seen = set()
     for title, url_link in extracted_items:
         if title in seen:
             continue
         seen.add(title)
         
-        if not is_notified(title, url_link):
+        if not is_notified(title):
             print(f"新規検知: {title}")
             send_line_notification(title, url_link)
-            save_notified(title, url_link)
+            save_notified(title)
         else:
             print(f"スキップ（通知済み）: {title}")
 
