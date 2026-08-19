@@ -70,21 +70,24 @@ def check_new_items():
         href = a['href']
         title = a.get_text(strip=True)
         
-        # 商品詳細ページ（/?pid= を含むURL）かつ、タイトルが存在するリンクを抽出
-        if '/?pid=' in href and title:
+        # 【重要フィルタ】
+        # 商品詳細ページ（/?pid= を含むURL）かつ、タイトルが適切（5〜100文字以内）なものだけを抽出
+        if '/?pid=' in href and title and 5 <= len(title) <= 100:
             # 相対パスを絶対パス（http...）に変換
             if href.startswith('/'):
-                href = TARGET_URL.rstrip('/') + href
-            elif not href.startswith('http'):
+                full_url = TARGET_URL.rstrip('/') + href
+            elif href.startswith('http'):
+                full_url = href
+            else:
                 continue
                 
             # DBに未登録のURLか確認
-            cursor.execute('SELECT url FROM products WHERE url = ?', (href,))
+            cursor.execute('SELECT url FROM products WHERE url = ?', (full_url,))
             result = cursor.fetchone()
             
             if not result:
                 # 新規登録
-                cursor.execute('INSERT INTO products (url, title) VALUES (?, ?)', (href, title))
+                cursor.execute('INSERT INTO products (url, title) VALUES (?, ?)', (full_url, title))
                 conn.commit()
                 
                 # 初回実行時はLINE送信をスキップ（DB登録のみ行う）
@@ -92,7 +95,7 @@ def check_new_items():
                     continue
 
                 # 送信用テキストを作成（LINE側で自動的にサムネイルカード化されます）
-                message = f"【新着・在庫更新】\n・{title}\n\n{href}"
+                message = f"【新着・在庫更新】\n・{title}\n\n{full_url}"
                 try:
                     line_bot_api.push_message(USER_ID, TextSendMessage(text=message))
                     print(f"通知送信: {title}")
