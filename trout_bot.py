@@ -1,8 +1,4 @@
 import os
-import requests
-import re
-from urllib.parse import urljoin
-from bs4 import BeautifulSoup
 
 # LINE Messaging API v3
 from linebot.v3.messaging import (
@@ -15,77 +11,34 @@ from linebot.v3.messaging import (
 
 CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN', '').strip()
 USER_ID = os.environ.get('LINE_USER_ID', '').strip()
-TARGET_URL = "https://troutisland.shop-pro.jp/"
 
-def clean_text(text):
-    if not text:
-        return ""
-    text = re.sub(r'[\r\n\t]+', ' ', text)
-    text = re.sub(r'\s+', ' ', text)
-    return text.strip()
-
-def force_https(url_str):
-    if not url_str:
-        return ""
-    if url_str.startswith("http://"):
-        return "https://" + url_str[7:]
-    return url_str
-
-def test_single_send():
-    if not CHANNEL_ACCESS_TOKEN or not USER_ID:
-        print("エラー: Secretsが設定されていません。")
-        return
-
-    headers = {"User-Agent": "Mozilla/5.0"}
-    try:
-        response = requests.get(TARGET_URL, headers=headers, timeout=10)
-        response.encoding = response.apparent_encoding
-        soup = BeautifulSoup(response.text, "html.parser")
-    except Exception as e:
-        print(f"サイトアクセスエラー: {e}")
-        return
-
-    target_item = None
-    links = soup.find_all('a', href=True)
-
-    for a in links:
-        title = clean_text(a.get_text())
-        href = clean_text(a['href'])
-
-        if not title or len(title) < 4 or len(title) > 100:
-            continue
-        if href in ['/', '#', 'javascript:void(0);'] or 'cart' in href or 'myaccount' in href:
-            continue
-
-        full_url = force_https(urljoin(TARGET_URL, href))
-        target_item = (title, full_url)
-        break
-
-    if not target_item:
-        print("更新対象が見つかりませんでした。")
-        return
-
-    title, link = target_item
-    print(f"テスト対象を取得しました: {title}")
-    print(f"送信URL: {link}")
-
-    # シンプルなテキスト本文を作成
-    message_text = f"【テスト通知】\n{title}\n\n{link}"
+def diagnose():
+    print("--- 設定値診断 ---")
+    print(f"TOKEN設定の有無: {'あり' if CHANNEL_ACCESS_TOKEN else 'なし'}")
+    print(f"USER_ID設定の有無: {'あり' if USER_ID else 'なし'}")
+    print(f"USER_IDの文字数: {len(USER_ID)}文字")
+    
+    if USER_ID:
+        print(f"USER_IDの先頭3文字: {USER_ID[:3]}")
+        if USER_ID.startswith("@"):
+            print("★警告: USER_IDにボットのID（@...）が設定されている可能性があります。")
+        elif not USER_ID.startswith("U"):
+            print("★警告: USER_IDは通常『U』から始まります。設定値をご確認ください。")
 
     configuration = Configuration(access_token=CHANNEL_ACCESS_TOKEN)
 
     try:
         with ApiClient(configuration) as api_client:
             line_bot_api = MessagingApi(api_client)
-            text_msg = TextMessage(text=message_text)
+            text_msg = TextMessage(text="接続テスト成功です！")
             push_message_request = PushMessageRequest(
                 to=USER_ID,
                 messages=[text_msg]
             )
             line_bot_api.push_message(push_message_request)
-        print("★テキストテスト送信成功！LINEをご確認ください。")
+        print("★接続テスト成功！LINEへ届きました。")
     except Exception as e:
-        print(f"★送信エラー: {e}")
+        print(f"★送信エラー詳細: {e}")
 
 if __name__ == "__main__":
-    test_single_send()
+    diagnose()
