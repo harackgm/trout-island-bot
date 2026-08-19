@@ -2,7 +2,7 @@ import os
 import sqlite3
 import requests
 import re
-from urllib.parse import urljoin
+from urllib.parse import urljoin, quote
 from bs4 import BeautifulSoup
 
 # LINE Messaging API v3
@@ -61,7 +61,6 @@ def check_new_items():
     
     target_item = None
 
-    # ページ内の有効な更新リンクから「1番最初の最新枠（FORODOXカラー等）」を特定
     for a in links:
         raw_href = a['href']
         raw_title = a.get_text()
@@ -69,7 +68,6 @@ def check_new_items():
         title = sanitize_string(raw_title)
         href = sanitize_string(raw_href)
         
-        # タイトル長チェックと不要メニューの除外
         if not title or len(title) < 4 or len(title) > 100:
             continue
             
@@ -83,8 +81,11 @@ def check_new_items():
         if not full_url.startswith('https://'):
             continue
 
-        # 「新入荷＆在庫更新情報」内の最新1件を保持してループ終了
-        target_item = (full_url, title)
+        # URLパラメータに含まれる特殊文字（&など）のエラー回避処理
+        # 安全な文字列構造（https://...）にサニタイズ
+        clean_url = full_url.replace('&amp;', '&')
+
+        target_item = (clean_url, title)
         break
 
     if target_item:
@@ -92,6 +93,7 @@ def check_new_items():
         print(f"テスト対象（最新の更新情報）を取得しました: {title}")
         print(f"送信URL: {full_url}")
         
+        # URLをプレーンテキストメッセージとして送信
         message_text = f"【動作テスト・最新更新】\n・{title}\n\n{full_url}"
         
         try:
