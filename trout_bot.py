@@ -11,13 +11,15 @@ from linebot.v3.messaging import (
     ApiClient,
     MessagingApi,
     PushMessageRequest,
-    TextMessage
+    FlexMessage,
+    FlexContainer
 )
 
 CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN', '').strip()
 USER_ID = os.environ.get('LINE_USER_ID', '').strip()
 TARGET_URL = "https://troutisland.shop-pro.jp/"
 DB_FILE = "data.db"
+DEFAULT_IMG = "https://raw.githubusercontent.com/line/line-images/master/blogs/20200806/logo.png"
 
 def init_db():
     conn = sqlite3.connect(DB_FILE)
@@ -62,15 +64,89 @@ def force_https(url_str):
         return "https://" + url_str[7:]
     return url_str
 
+def fetch_product_image(product_url, headers):
+    """商品ページに直接アクセスしてメイン画像(og:image または 商品画像)のURLを取得"""
+    try:
+        res = requests.get(product_url, headers=headers, timeout=5)
+        res.encoding = res.apparent_encoding
+        p_soup = BeautifulSoup(res.text, "html.parser")
+        
+        # 1. og:image タグを探す
+        og_img = p_soup.find("meta", property="og:image")
+        if og_img and og_img.get("content"):
+            return force_https(og_img.get("content"))
+        
+        # 2. カラーミーショップ標準の商品メイン画像タグを探す
+        img_tag = p_soup.find("img", id="product_image") or p_soup.find("img", class_="product_image")
+        if img_tag and img_tag.get("src"):
+            return force_https(urljoin(product_url, img_tag.get("src")))
+            
+    except Exception as e:
+        print(f"画像取得スキップ ({product_url}): {e}")
+    
+    return DEFAULT_IMG
+
+def create_flex_message(title, link, img_url):
+    """確実に画像を表示させるためのFlex Messageカード構造を作成"""
+    safe_title = title if len(title) <= 60 else title[:57] + "..."
+    
+    return {
+        "type": "bubble",
+        "hero": {
+            "type": "image",
+            "url": img_url,
+            "size": "full",
+            "aspectRatio": "4:3",
+            "aspectMode": "cover"
+        },
+        "body": {
+            "type": "box",
+            "layout": "vertical",
+            "contents": [
+                {
+                    "type": "text",
+                    "text": "【新着・在庫更新】",
+                    "weight": "bold",
+                    "color": "#1DB446",
+                    "size": "xs"
+                },
+                {
+                    "type": "text",
+                    "text": safe_title,
+                    "weight": "bold",
+                    "size": "sm",
+                    "wrap": True,
+                    "margin": "xs"
+                }
+            ]
+        },
+        "footer": {
+            "type": "box",
+            "layout": "vertical",
+            "spacing": "sm",
+            "contents": [
+                {
+                    "type": "button",
+                    "style": "primary",
+                    "color": "#1DB446",
+                    "height": "sm",
+                    "action": {
+                        "type": "uri",
+                        "label": "商品ページを開く",
+                        "uri": link
+                    }
+                }
+            ]
+        }
+    }
+
 def extract_updates(soup):
-    """オススメ商品枠を除外し、「新入荷・在庫更新情報」のテキスト領域のみを厳格に抽出"""
+    """「新入荷・在庫更新情報」のテキスト領域から商品リンクのみを抽出"""
     items = []
     
-    # ページ内から「新入荷」または「在庫更新」の文字列を持つブロックを特定
     target_blocks = []
     for tag in soup.find_all(['td', 'div', 'p', 'table']):
         text = tag.get_text()
-        # オススメ商品枠（「オススメ」や「おすすめ」という表記を含む親要素）は除外
         if ('新入荷' in text or '在庫更新' in text) and not ('オススメ' in text or 'おすすめ' in text):
             target_blocks.append(tag)
 
@@ -83,14 +159,10 @@ def extract_updates(soup):
             href = clean_text(a['href'])
             text = clean_text(a.get_text())
 
-            # 不要なナビゲーション、カテゴリ(mode=cate)、カート等の除外
             if not href or 'mode=cate' in href or 'cart' in href or 'myaccount' in href or href in ['/', '#']:
                 continue
 
-            # 日付（M/D）を含み、商品ページ(pid=)へ飛ぶリンクを限定取得
             parent_text = clean_text(a.parent.get_text()) if a.parent else ""
-            
-            # リンクテキスト自体または直前・親要素に日付（例: 3/26, 8/19）があるか判定
             has_date = bool(re.search(r'\d{1,2}/\d{1,2}', text) or re.search(r'\d{1,2}/\d{1,2}', parent_text))
 
             if has_date and ('pid=' in href or 'shop-pro.jp' in href):
@@ -129,13 +201,21 @@ def main():
         print("「新入荷＆在庫更新情報」の新しい更新はありませんでした。")
         return
 
-    # 最新の最大3件を送信
+    # 上位3件を対象
     send_targets = new_items[:3]
-    text_messages = []
+    flex_messages = []
 
     for title, link, _ in send_targets:
-        msg_text = f"【新着・在庫更新】\n{title}\n\n{link}"
-        text_messages.append(TextMessage(text=msg_text))
+        # 商品ページから直接画像を解析取得
+        img_url = fetch_product_image(link, headers)
+        
+        # カード型（Flex Message）のJSONを作成
+        flex_json = create_flex_message(title, link, img_url)
+        flex_container = FlexContainer.from_dict(flex_json)
+        
+        safe_alt = f"新着: {title}"[:40]
+        flex_msg = FlexMessage(alt_text=safe_alt, contents=flex_container)
+        flex_messages.append(flex_msg)
 
     configuration = Configuration(access_token=CHANNEL_ACCESS_TOKEN)
 
@@ -144,12 +224,12 @@ def main():
             line_bot_api = MessagingApi(api_client)
             push_message_request = PushMessageRequest(
                 to=USER_ID,
-                messages=text_messages
+                messages=flex_messages
             )
             line_bot_api.push_message(push_message_request)
         
         mark_as_seen([(key, title) for title, _, key in send_targets])
-        print(f"★オススメ商品枠を除外し、「新入荷・在庫更新情報」から{len(send_targets)}件送信しました！")
+        print(f"★商品画像を解析・取得し、{len(send_targets)}件を正常送信しました！")
     except Exception as e:
         print(f"★送信エラー: {e}")
 
