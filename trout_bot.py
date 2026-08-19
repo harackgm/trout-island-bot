@@ -19,7 +19,6 @@ CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN', '').strip()
 USER_ID = os.environ.get('LINE_USER_ID', '').strip()
 TARGET_URL = "https://troutisland.shop-pro.jp/"
 
-# LINEで確実に表示可能なデフォルト画像（ロゴ等）
 DEFAULT_IMG = "https://raw.githubusercontent.com/line/line-images/master/blogs/20200806/logo.png"
 DB_FILE = "data.db"
 
@@ -70,6 +69,9 @@ def create_flex_message(title, link, img_url):
     link = force_https(link)
     img_url = force_https(img_url) if img_url else DEFAULT_IMG
 
+    # 長文によるFlex Message容量オーバー（30KB制限）を防ぐためタイトルを最大80文字にカット
+    safe_title = title if len(title) <= 80 else title[:77] + "..."
+
     return {
         "type": "bubble",
         "hero": {
@@ -92,7 +94,7 @@ def create_flex_message(title, link, img_url):
                 },
                 {
                     "type": "text",
-                    "text": title,
+                    "text": safe_title,
                     "weight": "bold",
                     "size": "md",
                     "wrap": True
@@ -128,29 +130,21 @@ def extract_updates(soup):
     for a in all_a_tags:
         href = clean_text(a['href'])
         text = clean_text(a.get_text())
-        parent_text = clean_text(a.parent.get_text()) if a.parent else ""
 
-        # 不要・無効なナビゲーションリンクをスキップ
         if not href or href in ['/', '#'] or 'cart' in href or 'myaccount' in href:
             continue
 
-        title = ""
-        if re.search(r'\d{1,2}/\d{1,2}', text):
-            title = text
-        elif re.search(r'\d{1,2}/\d{1,2}', parent_text):
-            title = parent_text
-
-        if title and len(title) > 5:
+        # 日付（M/D）を含むテキストリンクのみを精密抽出
+        if re.search(r'\d{1,2}/\d{1,2}', text) and len(text) >= 5:
             full_url = force_https(urljoin(TARGET_URL, href))
             
-            # 画像URLの取得
-            img_tag = a.find('img') or (a.parent.find('img') if a.parent else None)
+            img_tag = a.find('img')
             if img_tag and img_tag.get('src'):
                 img_url = force_https(urljoin(TARGET_URL, img_tag.get('src')))
             else:
                 img_url = DEFAULT_IMG
 
-            items.append((title, full_url, img_url))
+            items.append((text, full_url, img_url))
 
     return items
 
@@ -184,7 +178,6 @@ def main():
         print("「新入荷＆在庫更新情報」の新しい更新はありませんでした。")
         return
 
-    # テストとして最新3件を送信
     send_targets = new_items[:3]
     flex_messages = []
 
@@ -192,9 +185,7 @@ def main():
         flex_json = create_flex_message(title, link, img_url)
         flex_container = FlexContainer.from_dict(flex_json)
         
-        # alt_textの文字数を40文字に安全カットして文字数制限エラーを防ぐ
         safe_alt = f"新着: {title}"[:40]
-        
         flex_msg = FlexMessage(alt_text=safe_alt, contents=flex_container)
         flex_messages.append(flex_msg)
 
@@ -210,7 +201,7 @@ def main():
             line_bot_api.push_message(push_message_request)
         
         mark_as_seen([(key, title) for title, _, _, key in send_targets])
-        print(f"★文字数制限を回避し、{len(send_targets)}件をLINEへ無事送信しました！")
+        print(f"★容量制限を回避し、{len(send_targets)}件をLINEへ正常送信しました！")
     except Exception as e:
         print(f"★送信エラー: {e}")
 
