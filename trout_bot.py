@@ -1,10 +1,11 @@
 import os
+import re
 import sqlite3
 import requests
-from urllib.parse import urljoin
+from urllib.parse import urljoin, quote
 from bs4 import BeautifulSoup
 
-# LINE Messaging API v3 用のインポート
+# LINE Messaging API v3
 from linebot.v3.messaging import (
     Configuration,
     ApiClient,
@@ -13,14 +14,12 @@ from linebot.v3.messaging import (
     TextMessage
 )
 
-# 環境変数から取得
 CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
 USER_ID = os.environ.get('LINE_USER_ID')
 BASE_URL = 'https://troutisland.shop-pro.jp/'
 DB_NAME = 'products.db'
 
 def init_db():
-    """データベースの初期化"""
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute('''
@@ -33,7 +32,6 @@ def init_db():
     conn.close()
 
 def is_db_empty():
-    """DBが空（初回実行）かどうかを判定"""
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute('SELECT COUNT(*) FROM products')
@@ -41,8 +39,15 @@ def is_db_empty():
     conn.close()
     return count == 0
 
+def sanitize_string(text):
+    """改行や余分な空白を除去"""
+    if not text:
+        return ""
+    # 改行やタブをスペースに置換し、連続する空白を1つにまとめる
+    cleaned = re.sub(r'[\r\n\t]+', ' ', text)
+    return cleaned.strip()
+
 def check_new_items():
-    """新入荷＆在庫更新情報のテキストリンクをチェックする"""
     if not CHANNEL_ACCESS_TOKEN or not USER_ID:
         print("エラー: LINE_CHANNEL_ACCESS_TOKEN または LINE_USER_ID が設定されていません。")
         return
@@ -70,31 +75,33 @@ def check_new_items():
     links = soup.find_all('a', href=True)
     
     for a in links:
-        href = a['href'].strip()
-        title = a.get_text(strip=True)
+        raw_href = a['href']
+        raw_title = a.get_text()
         
-        # 不要なナビゲーションや短すぎる・長すぎるタイトルを除外
+        # タイトルとURLの不要な改行・空白を除去
+        title = sanitize_string(raw_title)
+        href = sanitize_string(raw_href)
+        
         if not title or len(title) < 4 or len(title) > 100:
             continue
             
         if href in ['/', '#', 'javascript:void(0);'] or 'cart' in href or 'myaccount' in href:
             continue
 
-        # 絶対パスURLを作成
+        # 絶対パス化
         full_url = urljoin(BASE_URL, href)
-
-        # 【最重要】LINEの送信要件を満たすため、必ず https:// に変換
         if full_url.startswith('http://'):
             full_url = full_url.replace('http://', 'https://', 1)
-        elif not full_url.startswith('https://'):
+        
+        # https:// で始まらない場合は除外
+        if not full_url.startswith('https://'):
             continue
 
-        # DBに未登録のURLか確認
+        # DBチェック
         cursor.execute('SELECT url FROM products WHERE url = ?', (full_url,))
         result = cursor.fetchone()
         
         if not result:
-            # DBに新規登録
             cursor.execute('INSERT INTO products (url, title) VALUES (?, ?)', (full_url, title))
             conn.commit()
             
@@ -112,10 +119,13 @@ def check_new_items():
                     )
                     line_bot_api.push_message(push_message_request)
                     
-                print(f"通知送信: {title}")
+                print(f"通知成功: {title}")
                 new_items_found += 1
             except Exception as e:
-                print(f"LINE API送信エラー: {e}")
+                print(f"LINE API送信エラーが発生しました。")
+                print(f"  対象タイトル: {repr(title)}")
+                print(f"  対象URL: {repr(full_url)}")
+                print(f"  詳細エラー: {e}")
 
     conn.close()
     
