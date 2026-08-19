@@ -15,7 +15,7 @@ from linebot.v3.messaging import (
 
 CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
 USER_ID = os.environ.get('LINE_USER_ID')
-BASE_URL = 'http://troutisland.shop-pro.jp/'
+BASE_URL = 'https://troutisland.shop-pro.jp/'
 DB_NAME = 'products.db'
 
 def init_db():
@@ -61,12 +61,17 @@ def check_new_items():
         
         if '/?pid=' in href and title and len(title) >= 2:
             full_url = urljoin(BASE_URL, href)
+            # LINE API の必須要件（https通信）に適合させるため強制変換
+            if full_url.startswith('http://'):
+                full_url = full_url.replace('http://', 'https://', 1)
+                
             target_item = (full_url, title)
             break  # 1件見つかったら即終了
 
     if target_item:
         full_url, title = target_item
         print(f"テスト対象商品を取得しました: {title}")
+        print(f"送信URL: {full_url}")
         
         # テスト通知を送信
         message_text = f"【動作テスト・最新更新】\n{title}\n\n{full_url}"
