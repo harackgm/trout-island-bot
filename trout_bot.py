@@ -3,7 +3,7 @@ import sqlite3
 import requests
 from bs4 import BeautifulSoup
 
-# LINE Messaging API v3 用のインポート（例外は一般的な Exception で受けるため除外）
+# LINE Messaging API v3 用のインポート
 from linebot.v3.messaging import (
     Configuration,
     ApiClient,
@@ -70,15 +70,21 @@ def check_new_items():
 
     new_items_found = 0
 
-    # 「新入荷＆在庫更新情報」などのページ内リンクを探索
+    # ページ内の全リンクを取得
     links = soup.find_all('a', href=True)
     
     for a in links:
         href = a['href']
         title = a.get_text(strip=True)
         
-        # タイトルの長さとURL形式のチェック
-        if '/?pid=' in href and title and 5 <= len(title) <= 100:
+        # 【判定ロジックの改善】
+        # トップページの余計なナビリンク等を除外し、意味のある更新リンク（文字数4〜100文字）を抽出
+        if title and 4 <= len(title) <= 100:
+            # トップページ自身へのリンクや無関係なメニューを除外
+            if href in ['/', '#', 'javascript:void(0);'] or 'cart' in href or 'myaccount' in href:
+                continue
+                
+            # 相対パスを絶対パス（http...）に変換
             if href.startswith('/'):
                 full_url = TARGET_URL.rstrip('/') + href
             elif href.startswith('http'):
@@ -95,11 +101,11 @@ def check_new_items():
                 cursor.execute('INSERT INTO products (url, title) VALUES (?, ?)', (full_url, title))
                 conn.commit()
                 
-                # 初回実行時はLINE送信をスキップ（DB登録のみ行う）
+                # 初回実行時はLINE送信をスキップ
                 if first_run:
                     continue
 
-                # 送信用テキストを作成（LINE側で自動的にサムネイルカード化されます）
+                # 送信用テキストを作成
                 message_text = f"【新着・在庫更新】\n・{title}\n\n{full_url}"
                 
                 # LINE v3 APIによるPush送信
