@@ -25,11 +25,17 @@ def clean_text(text):
     text = re.sub(r'\s+', ' ', text)
     return text.strip()
 
+def force_https(url_str):
+    if not url_str:
+        return ""
+    if url_str.startswith("http://"):
+        return "https://" + url_str[7:]
+    return url_str
+
 def create_flex_message(title, link, img_url):
-    if link.startswith("http://"):
-        link = link.replace("http://", "https://", 1)
-    if img_url.startswith("http://"):
-        img_url = img_url.replace("http://", "https://", 1)
+    # LINE API仕様対策: 必ずhttps://へ強制変換
+    link = force_https(link)
+    img_url = force_https(img_url)
 
     return {
         "type": "bubble",
@@ -93,7 +99,6 @@ def test_single_send():
         print(f"サイトアクセスエラー: {e}")
         return
 
-    # ページ内のすべてのリンクから最新の更新枠（FORODOX等）を検索
     target_item = None
     links = soup.find_all('a', href=True)
 
@@ -101,7 +106,6 @@ def test_single_send():
         title = clean_text(a.get_text())
         href = clean_text(a['href'])
 
-        # タイトル長チェック & 無効リンク除外
         if not title or len(title) < 4 or len(title) > 100:
             continue
         if href in ['/', '#', 'javascript:void(0);'] or 'cart' in href or 'myaccount' in href:
@@ -109,7 +113,6 @@ def test_single_send():
 
         full_url = urljoin(TARGET_URL, href)
         
-        # 内包されている画像を探す（無ければショップのロゴ画像を代替使用）
         img_tag = a.find('img')
         if img_tag and img_tag.get('src'):
             img_url = urljoin(TARGET_URL, img_tag.get('src'))
@@ -125,7 +128,8 @@ def test_single_send():
 
     title, link, img_url = target_item
     print(f"テスト対象を取得しました: {title}")
-    print(f"送信URL: {link}")
+    print(f"送信URL(変換前): {link}")
+    print(f"送信URL(変換後): {force_https(link)}")
 
     flex_json = create_flex_message(title, link, img_url)
     configuration = Configuration(access_token=CHANNEL_ACCESS_TOKEN)
