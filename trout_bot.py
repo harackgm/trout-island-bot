@@ -2,6 +2,7 @@ import os
 import sqlite3
 import requests
 import re
+import hashlib
 from urllib.parse import urljoin
 from bs4 import BeautifulSoup
 
@@ -17,15 +18,17 @@ from linebot.v3.messaging import (
 
 CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN', '').strip()
 TARGET_URL = "https://troutisland.shop-pro.jp/"
-DB_FILE = "data.db"
+DB_FILE = "products.db"
 DEFAULT_IMG = "https://raw.githubusercontent.com/line/line-images/master/blogs/20200806/logo.png"
 
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
+    # item_key (URL+テキストのハッシュ値) を主キーに変更
     c.execute('''
         CREATE TABLE IF NOT EXISTS seen_items (
-            url TEXT PRIMARY KEY,
+            item_key TEXT PRIMARY KEY,
+            url TEXT,
             title TEXT,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
@@ -33,19 +36,25 @@ def init_db():
     conn.commit()
     conn.close()
 
-def is_seen(url):
+def generate_key(url, title):
+    """URLとテキストを組み合わせた一意の識別キーを生成"""
+    raw_str = f"{url}_{title}"
+    return hashlib.md5(raw_str.encode('utf-8')).hexdigest()
+
+def is_seen(item_key):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute('SELECT 1 FROM seen_items WHERE url = ?', (url,))
+    c.execute('SELECT 1 FROM seen_items WHERE item_key = ?', (item_key,))
     row = c.fetchone()
     conn.close()
     return row is not None
 
 def mark_as_seen(items):
+    """(item_key, url, title) のトリプルを記録"""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    for url, title in items:
-        c.execute('INSERT OR IGNORE INTO seen_items (url, title) VALUES (?, ?)', (url, title))
+    for item_key, url, title in items:
+        c.execute('INSERT OR IGNORE INTO seen_items (item_key, url, title) VALUES (?, ?, ?)', (item_key, url, title))
     conn.commit()
     conn.close()
 
@@ -101,7 +110,7 @@ def create_bubble(title, link, img_url):
             "contents": [
                 {
                     "type": "text",
-                    "text": "【新着】",
+                    "text": "【新着・更新】",
                     "weight": "bold",
                     "color": "#1DB446",
                     "size": "xs"
@@ -184,12 +193,13 @@ def main():
     raw_items = extract_updates(soup)
     
     new_items = []
-    seen_urls = set()
+    seen_keys = set()
     
     for title, url in raw_items:
-        if url not in seen_urls and not is_seen(url):
-            seen_urls.add(url)
-            new_items.append((title, url))
+        item_key = generate_key(url, title)
+        if item_key not in seen_keys and not is_seen(item_key):
+            seen_keys.add(item_key)
+            new_items.append((item_key, title, url))
 
     if not new_items:
         print("「新入荷＆在庫更新情報」の新しい更新はありませんでした。")
@@ -198,7 +208,7 @@ def main():
     send_targets = new_items[:7]
     bubbles = []
 
-    for title, link in send_targets:
+    for item_key, title, link in send_targets:
         img_url = fetch_product_image(link, headers)
         bubble_json = create_bubble(title, link, img_url)
         bubbles.append(bubble_json)
@@ -209,19 +219,18 @@ def main():
     }
 
     flex_container = FlexContainer.from_dict(carousel_json)
-    flex_msg = FlexMessage(alt_text=f"新着入荷情報 ({len(send_targets)}件)", contents=flex_container)
+    flex_msg = FlexMessage(alt_text=f"新着・在庫更新情報 ({len(send_targets)}件)", contents=flex_container)
 
     configuration = Configuration(access_token=CHANNEL_ACCESS_TOKEN)
 
     try:
         with ApiClient(configuration) as api_client:
             line_bot_api = MessagingApi(api_client)
-            # 友だち全員宛て（一括ブロードキャスト送信）
             broadcast_request = BroadcastRequest(messages=[flex_msg])
             line_bot_api.broadcast(broadcast_request)
         
-        mark_as_seen([(url, title) for title, url in send_targets])
-        print(f"★全登録者へ新着{len(send_targets)}件のカルーセル通知を一括送信しました。")
+        mark_as_seen([(item_key, url, title) for item_key, title, url in send_targets])
+        print(f"★全登録者へ新着・在庫更新 {len(send_targets)}件のカルーセル通知を一括送信しました。")
     except Exception as e:
         print(f"★送信エラー: {e}")
 
