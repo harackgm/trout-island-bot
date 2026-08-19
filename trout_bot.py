@@ -1,6 +1,7 @@
 import os
 import sqlite3
 import requests
+import re
 from urllib.parse import urljoin
 from bs4 import BeautifulSoup
 
@@ -30,6 +31,12 @@ def init_db():
     conn.commit()
     conn.close()
 
+def sanitize_string(text):
+    if not text:
+        return ""
+    cleaned = re.sub(r'[\r\n\t]+', ' ', text)
+    return cleaned.strip()
+
 def check_new_items():
     if not CHANNEL_ACCESS_TOKEN or not USER_ID:
         print("エラー: LINE_CHANNEL_ACCESS_TOKEN または LINE_USER_ID が設定されていません。")
@@ -54,27 +61,38 @@ def check_new_items():
     
     target_item = None
 
-    # HP上で最初に見つかる『/?pid=』付きの最新商品1件を取得
+    # ページ内の有効な更新リンクから「1番最初の最新枠（FORODOXカラー等）」を特定
     for a in links:
-        href = a['href'].strip()
-        title = a.get_text(strip=True)
+        raw_href = a['href']
+        raw_title = a.get_text()
         
-        if '/?pid=' in href and title and len(title) >= 2:
-            full_url = urljoin(BASE_URL, href)
-            # LINE API の必須要件（https通信）に適合させるため強制変換
-            if full_url.startswith('http://'):
-                full_url = full_url.replace('http://', 'https://', 1)
-                
-            target_item = (full_url, title)
-            break  # 1件見つかったら即終了
+        title = sanitize_string(raw_title)
+        href = sanitize_string(raw_href)
+        
+        # タイトル長チェックと不要メニューの除外
+        if not title or len(title) < 4 or len(title) > 100:
+            continue
+            
+        if href in ['/', '#', 'javascript:void(0);'] or 'cart' in href or 'myaccount' in href:
+            continue
+
+        full_url = urljoin(BASE_URL, href)
+        if full_url.startswith('http://'):
+            full_url = full_url.replace('http://', 'https://', 1)
+            
+        if not full_url.startswith('https://'):
+            continue
+
+        # 「新入荷＆在庫更新情報」内の最新1件を保持してループ終了
+        target_item = (full_url, title)
+        break
 
     if target_item:
         full_url, title = target_item
-        print(f"テスト対象商品を取得しました: {title}")
+        print(f"テスト対象（最新の更新情報）を取得しました: {title}")
         print(f"送信URL: {full_url}")
         
-        # テスト通知を送信
-        message_text = f"【動作テスト・最新更新】\n{title}\n\n{full_url}"
+        message_text = f"【動作テスト・最新更新】\n・{title}\n\n{full_url}"
         
         try:
             with ApiClient(configuration) as api_client:
@@ -85,7 +103,6 @@ def check_new_items():
                 )
                 line_bot_api.push_message(push_message_request)
                 
-            # 送信成功したらDBに保存（次回以降の重複通知を防止）
             cursor.execute('INSERT OR REPLACE INTO products (url, title) VALUES (?, ?)', (full_url, title))
             conn.commit()
             print("LINEへのテスト通知が成功しました！DBに登録完了。")
@@ -93,7 +110,7 @@ def check_new_items():
         except Exception as e:
             print(f"LINE API送信エラー: {e}")
     else:
-        print("商品リンク（/?pid=）が見つかりませんでした。")
+        print("更新リンクが見つかりませんでした。")
 
     conn.close()
 
