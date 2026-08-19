@@ -2,7 +2,7 @@ import os
 import sqlite3
 import requests
 import re
-from urllib.parse import urljoin, quote
+from urllib.parse import urljoin
 from bs4 import BeautifulSoup
 
 # LINE Messaging API v3
@@ -31,18 +31,26 @@ def init_db():
     conn.commit()
     conn.close()
 
-def sanitize_string(text):
+def clean_text(text):
+    """改行・タブ・連続空白をすべて1つのスペースに変換してサニタイズ"""
     if not text:
         return ""
-    cleaned = re.sub(r'[\r\n\t]+', ' ', text)
-    return cleaned.strip()
+    # 改行(\r, \n)やタブ(\t)をスペースに置換
+    text = re.sub(r'[\r\n\t]+', ' ', text)
+    # 連続するスペースを1つに縮小
+    text = re.sub(r'\s+', ' ', text)
+    return text.strip()
 
 def check_new_items():
     if not CHANNEL_ACCESS_TOKEN or not USER_ID:
         print("エラー: LINE_CHANNEL_ACCESS_TOKEN または LINE_USER_ID が設定されていません。")
         return
 
-    configuration = Configuration(access_token=CHANNEL_ACCESS_TOKEN)
+    # 前後の空白や改行を除去
+    token = CHANNEL_ACCESS_TOKEN.strip() if CHANNEL_ACCESS_TOKEN else ""
+    user_id = USER_ID.strip() if USER_ID else ""
+
+    configuration = Configuration(access_token=token)
     
     print("巡回チェックを開始します...")
     try:
@@ -65,8 +73,9 @@ def check_new_items():
         raw_href = a['href']
         raw_title = a.get_text()
         
-        title = sanitize_string(raw_title)
-        href = sanitize_string(raw_href)
+        # 文字列の完全クレンジング
+        title = clean_text(raw_title)
+        href = clean_text(raw_href)
         
         if not title or len(title) < 4 or len(title) > 100:
             continue
@@ -81,26 +90,22 @@ def check_new_items():
         if not full_url.startswith('https://'):
             continue
 
-        # URLパラメータに含まれる特殊文字（&など）のエラー回避処理
-        # 安全な文字列構造（https://...）にサニタイズ
-        clean_url = full_url.replace('&amp;', '&')
-
-        target_item = (clean_url, title)
+        target_item = (full_url, title)
         break
 
     if target_item:
         full_url, title = target_item
-        print(f"テスト対象（最新の更新情報）を取得しました: {title}")
-        print(f"送信URL: {full_url}")
+        print(f"テスト対象を取得しました: {repr(title)}")
+        print(f"送信URL: {repr(full_url)}")
         
-        # URLをプレーンテキストメッセージとして送信
+        # メッセージ本文（改行は \n のみを使用）
         message_text = f"【動作テスト・最新更新】\n・{title}\n\n{full_url}"
         
         try:
             with ApiClient(configuration) as api_client:
                 line_bot_api = MessagingApi(api_client)
                 push_message_request = PushMessageRequest(
-                    to=USER_ID,
+                    to=user_id,
                     messages=[TextMessage(text=message_text)]
                 )
                 line_bot_api.push_message(push_message_request)
@@ -110,7 +115,7 @@ def check_new_items():
             print("LINEへのテスト通知が成功しました！DBに登録完了。")
             
         except Exception as e:
-            print(f"LINE API送信エラー: {e}")
+            print(f"LINE API送信エラーが発生しました: {e}")
     else:
         print("更新リンクが見つかりませんでした。")
 
