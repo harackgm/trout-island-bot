@@ -9,7 +9,7 @@ from linebot.v3.messaging import (
     ApiClient,
     MessagingApi,
     PushMessageRequest,
-    FlexSendMessage,
+    FlexMessage,
     FlexContainer
 )
 
@@ -81,7 +81,6 @@ def test_single_send():
     response.encoding = response.apparent_encoding
     soup = BeautifulSoup(response.text, "html.parser")
 
-    # トップページの先頭1件を取得
     item_box = soup.find("li", class_="product_item")
     if not item_box:
         print("商品が見つかりませんでした。")
@@ -96,7 +95,6 @@ def test_single_send():
 
     print(f"テスト対象を取得しました: {title}")
 
-    # DBを無視して1件送信
     flex_json = create_flex_message(title, link, img_url)
     configuration = Configuration(access_token=CHANNEL_ACCESS_TOKEN)
 
@@ -104,7 +102,7 @@ def test_single_send():
         with ApiClient(configuration) as api_client:
             line_bot_api = MessagingApi(api_client)
             flex_container = FlexContainer.from_dict(flex_json)
-            flex_msg = FlexSendMessage(
+            flex_msg = FlexMessage(
                 alt_text=f"テスト通知: {title}", 
                 contents=flex_container
             )
