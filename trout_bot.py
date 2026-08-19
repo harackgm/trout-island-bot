@@ -18,6 +18,7 @@ from linebot.v3.messaging import (
 CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN', '').strip()
 USER_ID = os.environ.get('LINE_USER_ID', '').strip()
 TARGET_URL = "https://troutisland.shop-pro.jp/"
+DEFAULT_IMG = "https://img07.shop-pro.jp/PA01271/083/etc/logo.png"
 DB_FILE = "data.db"
 
 def init_db():
@@ -33,10 +34,10 @@ def init_db():
     conn.commit()
     conn.close()
 
-def is_seen(url):
+def is_seen(key):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute('SELECT 1 FROM seen_items WHERE url = ?', (url,))
+    c.execute('SELECT 1 FROM seen_items WHERE url = ?', (key,))
     row = c.fetchone()
     conn.close()
     return row is not None
@@ -44,8 +45,8 @@ def is_seen(url):
 def mark_as_seen(items):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    for url, title in items:
-        c.execute('INSERT OR IGNORE INTO seen_items (url, title) VALUES (?, ?)', (url, title))
+    for key, title in items:
+        c.execute('INSERT OR IGNORE INTO seen_items (url, title) VALUES (?, ?)', (key, title))
     conn.commit()
     conn.close()
 
@@ -63,9 +64,9 @@ def force_https(url_str):
         return "https://" + url_str[7:]
     return url_str
 
-def create_flex_message(title, link):
+def create_flex_message(title, link, img_url):
     link = force_https(link)
-    img_url = "https://img07.shop-pro.jp/PA01271/083/etc/logo.png"
+    img_url = force_https(img_url) if img_url else DEFAULT_IMG
 
     return {
         "type": "bubble",
@@ -82,7 +83,7 @@ def create_flex_message(title, link):
             "contents": [
                 {
                     "type": "text",
-                    "text": "【トラウトアイランド 新着・更新情報】",
+                    "text": "【新入荷・在庫更新情報】",
                     "weight": "bold",
                     "color": "#1DB446",
                     "size": "sm"
@@ -108,7 +109,7 @@ def create_flex_message(title, link):
                     "height": "sm",
                     "action": {
                         "type": "uri",
-                        "label": "ショップを開く",
+                        "label": "商品ページを開く",
                         "uri": link
                     }
                 }
@@ -117,27 +118,51 @@ def create_flex_message(title, link):
     }
 
 def extract_updates(soup):
-    """HTML全体から日付（例: 8/19, 08/19）が含まれる行を強制抽出"""
+    """新入荷・在庫更新情報枠から正確な商品名・個別URL・画像を抽出"""
     items = []
-    
-    # ページ内の全テキスト要素を取得
-    text_nodes = soup.find_all(text=True)
-    
-    for node in text_nodes:
-        text = clean_text(str(node))
-        # 「8/19」や「08/19」などの日付パターンを判定
-        if re.search(r'\b\d{1,2}/\d{1,2}\b', text) and len(text) > 6:
-            # 該当要素から最も近いリンクを探す
-            parent = node.parent
-            link_tag = parent.find_parent('a') or parent.find('a')
-            
-            if link_tag and link_tag.get('href'):
-                href = link_tag['href']
-                full_url = force_https(urljoin(TARGET_URL, href))
-            else:
-                full_url = TARGET_URL
 
-            items.append((text, full_url))
+    # 「新入荷＆在庫更新情報」のヘッダーを探す
+    header_node = soup.find(lambda tag: tag.string and '新入荷＆在庫更新情報' in tag.string)
+    if not header_node:
+        return items
+
+    # 該当エリアのテーブルコンテナを取得
+    container = header_node.find_parent(['td', 'table', 'div'])
+    if not container:
+        container = soup
+
+    # エリア内の全リンクを取得
+    links = container.find_all('a', href=True)
+    
+    for a in links:
+        href = clean_text(a['href'])
+        
+        # 不要なナビゲーション系リンクを排除
+        if not href or href in ['/', '#'] or 'cart' in href or 'myaccount' in href:
+            continue
+            
+        full_url = force_https(urljoin(TARGET_URL, href))
+        
+        # リンク自体のテキスト、または親要素（行）のテキストを取得
+        text = clean_text(a.get_text())
+        parent_text = clean_text(a.parent.get_text()) if a.parent else ""
+        
+        # 日付を含むタイトルテキストを優先構築
+        if re.search(r'\d{1,2}/\d{1,2}', parent_text):
+            display_title = parent_text
+        elif re.search(r'\d{1,2}/\d{1,2}', text):
+            display_title = text
+        else:
+            continue
+
+        # 画像URLの取得
+        img_tag = a.find('img')
+        if img_tag and img_tag.get('src'):
+            img_url = force_https(urljoin(TARGET_URL, img_tag.get('src')))
+        else:
+            img_url = DEFAULT_IMG
+
+        items.append((display_title, full_url, img_url))
 
     return items
 
@@ -161,22 +186,22 @@ def main():
     
     new_items = []
     seen_keys = set()
-    for title, url in raw_items:
-        key = f"{title}"  # タイトル文字列自体を重複判定キーに使用
+    for title, url, img_url in raw_items:
+        key = f"{title}_{url}"
         if key not in seen_keys and not is_seen(key):
             seen_keys.add(key)
-            new_items.append((title, url, key))
+            new_items.append((title, url, img_url, key))
 
     if not new_items:
         print("「新入荷＆在庫更新情報」の新しい更新はありませんでした。")
         return
 
-    # 初回検出時は最新の最大3件をLINEへ送信
+    # 最新の最大3件を送信
     send_targets = new_items[:3]
     flex_messages = []
 
-    for title, link, _ in send_targets:
-        flex_json = create_flex_message(title, link)
+    for title, link, img_url, _ in send_targets:
+        flex_json = create_flex_message(title, link, img_url)
         flex_container = FlexContainer.from_dict(flex_json)
         flex_msg = FlexMessage(alt_text=f"新着: {title}", contents=flex_container)
         flex_messages.append(flex_msg)
@@ -192,8 +217,8 @@ def main():
             )
             line_bot_api.push_message(push_message_request)
         
-        mark_as_seen([(key, title) for title, _, key in send_targets])
-        print(f"★更新情報を{len(send_targets)}件検出してLINEへ通知しました！")
+        mark_as_seen([(key, title) for title, _, _, key in send_targets])
+        print(f"★商品個別URL・画像付きで{len(send_targets)}件をLINEへ通知しました！")
     except Exception as e:
         print(f"★送信エラー: {e}")
 
