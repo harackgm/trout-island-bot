@@ -42,8 +42,32 @@ def save_notified(item_key):
     conn.commit()
     conn.close()
 
-def send_combined_line_notification(new_items):
-    """複数の新規入荷情報を1通のLINEメッセージにまとめて送信"""
+def get_product_image(product_url):
+    """商品ページから画像URLを抽出（見つからなければNone）"""
+    if not product_url or product_url == TARGET_URL:
+        return None
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        res = requests.get(product_url, headers=headers, timeout=5)
+        res.encoding = res.apparent_encoding
+        soup = BeautifulSoup(res.text, "html.parser")
+        
+        # og:image タグから高画質画像を取得、無ければimgタグから検索
+        og_image = soup.find("meta", property="og:image")
+        if og_image and og_image.get("content"):
+            return og_image["content"]
+            
+        img_tag = soup.find("img", src=re.compile(r'/upload/save_image/|/product/'))
+        if img_tag and img_tag.get("src"):
+            return requests.compat.urljoin(product_url, img_tag["src"])
+    except Exception as e:
+        print(f"画像取得エラー ({product_url}): {e}")
+    return None
+
+def send_individual_line_notification(title, url_link):
+    """1件ごとに写真付きメッセージをLINEへ送信"""
     if not LINE_ACCESS_TOKEN or not LINE_USER_ID:
         print("エラー: LINEアクセストークンまたはユーザーIDが設定されていません。")
         return
@@ -54,38 +78,44 @@ def send_combined_line_notification(new_items):
         "Authorization": f"Bearer {LINE_ACCESS_TOKEN}"
     }
     
-    # メッセージ作成
-    message_text = "【トラウトアイランド 新入荷・更新情報】\n"
-    for title, url_link in new_items:
-        message_text += f"\n・{title}"
-        if url_link and url_link != TARGET_URL:
-            message_text += f"\n  {url_link}"
+    # 画像URLを取得
+    image_url = get_product_image(url_link)
     
-    # LINE送信文字数上限（5000文字）に配慮してカット
-    if len(message_text) > 4500:
-        message_text = message_text[:4500] + "\n...(以下省略)"
+    messages = []
+    
+    # 画像が存在すれば画像メッセージを追加（HTTPS必須）
+    if image_url and image_url.startswith("https://"):
+        messages.append({
+            "type": "image",
+            "originalContentUrl": image_url,
+            "previewImageUrl": image_url
+        })
+        
+    # テキストメッセージ（商品名＋URL）
+    message_text = f"【トラウトアイランド 新入荷】\n{title}"
+    if url_link and url_link != TARGET_URL:
+        message_text += f"\n\n{url_link}"
+        
+    messages.append({
+        "type": "text",
+        "text": message_text
+    })
 
     payload = {
         "to": LINE_USER_ID,
-        "messages": [
-            {
-                "type": "text",
-                "text": message_text
-            }
-        ]
+        "messages": messages
     }
     
     response = requests.post(api_url, headers=headers, json=payload)
     if response.status_code == 200:
-        print(f"送信成功（まとめ送信 {len(new_items)}件）")
-        for title, _ in new_items:
-            save_notified(title)
+        print(f"送信成功: {title}")
+        save_notified(title)
     else:
         print(f"送信失敗 [{response.status_code}]: {response.text}")
 
 def main():
     init_db()
-    print("トラウトアイランドの巡回チェックを開始します...")
+    print("トラウトアイランドの巡回チェック（写真付き個別通知モード）を開始します...")
 
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -114,8 +144,6 @@ def main():
     print(f"抽出された更新情報件数: {len(extracted_items)}件")
 
     seen = set()
-    items_to_notify = []
-    
     for title, url_link in extracted_items:
         if title in seen:
             continue
@@ -123,14 +151,9 @@ def main():
         
         if not is_notified(title):
             print(f"新規検知: {title}")
-            items_to_notify.append((title, url_link))
+            send_individual_line_notification(title, url_link)
         else:
             print(f"スキップ（通知済み）: {title}")
-
-    if items_to_notify:
-        send_combined_line_notification(items_to_notify)
-    else:
-        print("新しい更新情報はありませんでした。")
 
 if __name__ == "__main__":
     main()
