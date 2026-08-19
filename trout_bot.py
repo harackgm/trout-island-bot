@@ -118,51 +118,55 @@ def create_flex_message(title, link, img_url):
     }
 
 def extract_updates(soup):
-    """新入荷・在庫更新情報枠から正確な商品名・個別URL・画像を抽出"""
+    """新入荷・在庫更新情報エリアから行ごとのテキストと個別リンクを完全にセットで抽出"""
     items = []
 
-    # 「新入荷＆在庫更新情報」のヘッダーを探す
-    header_node = soup.find(lambda tag: tag.string and '新入荷＆在庫更新情報' in tag.string)
-    if not header_node:
+    # 「新入荷＆在庫更新情報」の要素を取得
+    target = soup.find(lambda tag: tag.string and '新入荷＆在庫更新情報' in tag.string)
+    if not target:
+        # 見つからない場合はキーワード検索
+        for el in soup.find_all(['td', 'th', 'div', 'b']):
+            if '新入荷＆在庫更新情報' in el.text:
+                target = el
+                break
+
+    if not target:
         return items
 
-    # 該当エリアのテーブルコンテナを取得
-    container = header_node.find_parent(['td', 'table', 'div'])
+    # 対象ブロックを取得
+    container = target.find_parent(['table', 'td', 'div'])
     if not container:
         container = soup
 
-    # エリア内の全リンクを取得
+    # 枠内のテキストを行ごとに走査
+    lines = [clean_text(line) for line in container.get_text().split('\n') if clean_text(line)]
     links = container.find_all('a', href=True)
-    
-    for a in links:
-        href = clean_text(a['href'])
-        
-        # 不要なナビゲーション系リンクを排除
-        if not href or href in ['/', '#'] or 'cart' in href or 'myaccount' in href:
-            continue
-            
-        full_url = force_https(urljoin(TARGET_URL, href))
-        
-        # リンク自体のテキスト、または親要素（行）のテキストを取得
-        text = clean_text(a.get_text())
-        parent_text = clean_text(a.parent.get_text()) if a.parent else ""
-        
-        # 日付を含むタイトルテキストを優先構築
-        if re.search(r'\d{1,2}/\d{1,2}', parent_text):
-            display_title = parent_text
-        elif re.search(r'\d{1,2}/\d{1,2}', text):
-            display_title = text
-        else:
-            continue
 
-        # 画像URLの取得
-        img_tag = a.find('img')
-        if img_tag and img_tag.get('src'):
-            img_url = force_https(urljoin(TARGET_URL, img_tag.get('src')))
-        else:
+    for line in lines:
+        # 「8/19」等の日付が含まれている行を抽出
+        if re.search(r'\d{1,2}/\d{1,2}', line) and len(line) > 5:
+            target_url = TARGET_URL
             img_url = DEFAULT_IMG
 
-        items.append((display_title, full_url, img_url))
+            # 行内のキーワードにマッチするリンクを探索
+            for a in links:
+                href = a['href']
+                a_text = clean_text(a.get_text())
+                
+                if not href or href in ['/', '#'] or 'cart' in href or 'myaccount' in href:
+                    continue
+
+                # リンクテキストが行テキストの一部である場合、そのURLを採用
+                if a_text and a_text in line:
+                    target_url = force_https(urljoin(TARGET_URL, href))
+                    
+                    # リンク内に画像がある場合取得
+                    img_tag = a.find('img')
+                    if img_tag and img_tag.get('src'):
+                        img_url = force_https(urljoin(TARGET_URL, img_tag.get('src')))
+                    break
+
+            items.append((line, target_url, img_url))
 
     return items
 
@@ -184,11 +188,12 @@ def main():
 
     raw_items = extract_updates(soup)
     
+    # 重複判定（テスト用として、今回は最新3件を未読チェックを通過させて強制送信）
     new_items = []
     seen_keys = set()
     for title, url, img_url in raw_items:
         key = f"{title}_{url}"
-        if key not in seen_keys and not is_seen(key):
+        if key not in seen_keys:
             seen_keys.add(key)
             new_items.append((title, url, img_url, key))
 
@@ -218,7 +223,7 @@ def main():
             line_bot_api.push_message(push_message_request)
         
         mark_as_seen([(key, title) for title, _, _, key in send_targets])
-        print(f"★商品個別URL・画像付きで{len(send_targets)}件をLINEへ通知しました！")
+        print(f"★商品更新情報を{len(send_targets)}件、LINEへ送信完了しました！")
     except Exception as e:
         print(f"★送信エラー: {e}")
 
