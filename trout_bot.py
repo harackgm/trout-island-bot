@@ -24,7 +24,14 @@ DEFAULT_IMG = "https://raw.githubusercontent.com/line/line-images/master/blogs/2
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    # item_key (URL+テキストのハッシュ値) を主キーに変更
+    
+    # テーブル構造の確認と自動マイグレーション（旧テーブルがある場合は再作成）
+    c.execute("PRAGMA table_info(seen_items)")
+    columns = [column[1] for column in c.fetchall()]
+    
+    if columns and 'item_key' not in columns:
+        c.execute("DROP TABLE seen_items")
+        
     c.execute('''
         CREATE TABLE IF NOT EXISTS seen_items (
             item_key TEXT PRIMARY KEY,
@@ -229,6 +236,7 @@ def main():
             broadcast_request = BroadcastRequest(messages=[flex_msg])
             line_bot_api.broadcast(broadcast_request)
         
+        # 正しいデータ構造でDBに記録
         mark_as_seen([(item_key, url, title) for item_key, title, url in send_targets])
         print(f"★全登録者へ新着・在庫更新 {len(send_targets)}件のカルーセル通知を一括送信しました。")
     except Exception as e:
