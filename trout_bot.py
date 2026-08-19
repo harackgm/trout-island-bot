@@ -16,7 +16,7 @@ from linebot.v3.messaging import (
 # 環境変数から取得
 CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
 USER_ID = os.environ.get('LINE_USER_ID')
-BASE_URL = 'http://troutisland.shop-pro.jp/'
+BASE_URL = 'https://troutisland.shop-pro.jp/'
 DB_NAME = 'products.db'
 
 def init_db():
@@ -80,11 +80,13 @@ def check_new_items():
         if href in ['/', '#', 'javascript:void(0);'] or 'cart' in href or 'myaccount' in href:
             continue
 
-        # urllib.parse.urljoin を使い、どんな相対パスでも完璧な絶対URL (http://...) に変換
+        # 絶対パスURLを作成
         full_url = urljoin(BASE_URL, href)
 
-        # 【厳格チェック】必ず http:// か https:// で始まる正常なURLのみ対象
-        if not (full_url.startswith('http://') or full_url.startswith('https://')):
+        # 【最重要】LINEの送信要件を満たすため、必ず https:// に変換
+        if full_url.startswith('http://'):
+            full_url = full_url.replace('http://', 'https://', 1)
+        elif not full_url.startswith('https://'):
             continue
 
         # DBに未登録のURLか確認
