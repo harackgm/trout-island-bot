@@ -63,23 +63,36 @@ def force_https(url_str):
     return url_str
 
 def extract_updates(soup):
-    """商品ごとの個別リンクから正確な商品タイトルのみを抽出"""
+    """「新入荷・在庫更新情報」枠内の日付付き商品リンクのみをピンポイント抽出"""
     items = []
-    all_a_tags = soup.find_all('a', href=True)
+    
+    # ページ全体から「新入荷」等の見出しを持つ親要素を探す
+    news_area = None
+    for element in soup.find_all(['div', 'td', 'table', 'section']):
+        text = element.get_text()
+        if '新入荷' in text and '在庫更新' in text:
+            # 最も深くネストされた更新枠を優先特定
+            news_area = element
+            break
 
-    for a in all_a_tags:
+    search_target = news_area if news_area else soup
+
+    # 日付(例: 3/26)が含まれるテキストノードとリンク(aタグ)の関係を解析
+    a_tags = search_target.find_all('a', href=True)
+    for a in a_tags:
         href = clean_text(a['href'])
         text = clean_text(a.get_text())
 
-        # 不要なナビゲーションやカート領域のリンクを排除
-        if not href or href in ['/', '#'] or 'cart' in href or 'myaccount' in href:
+        # 不要なナビゲーションやカテゴリリンク(mode=cate)を徹底除外
+        if not href or 'mode=cate' in href or 'cart' in href or 'myaccount' in href or href == '/':
             continue
 
-        # 商品ページ(pid=) または カテゴリページ(mode=) へのリンクを対象とする
-        if ('pid=' in href or 'mode=' in href or 'shop-pro.jp' in href) and len(text) >= 3:
+        # 商品個別ページ(pid=) または 日付が含まれるリンクのみ対象
+        parent_text = a.parent.get_text() if a.parent else ""
+        has_date = bool(re.search(r'\d{1,2}/\d{1,2}', text) or re.search(r'\d{1,2}/\d{1,2}', parent_text))
+
+        if 'pid=' in href or (has_date and len(text) >= 3):
             full_url = force_https(urljoin(TARGET_URL, href))
-            
-            # 周囲の余計な文章を排除し、リンク自体の文字（商品名）だけを採用
             items.append((text, full_url))
 
     return items
@@ -91,7 +104,7 @@ def main():
 
     init_db()
 
-    headers = {"User-Agent": "Mozilla/5.0"}
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     try:
         response = requests.get(TARGET_URL, headers=headers, timeout=10)
         response.encoding = response.apparent_encoding
@@ -106,7 +119,7 @@ def main():
     seen_keys = set()
     for title, url in raw_items:
         key = f"{title}_{url}"
-        if key not in seen_keys:
+        if key not in seen_keys and not is_seen(key):
             seen_keys.add(key)
             new_items.append((title, url, key))
 
@@ -114,12 +127,12 @@ def main():
         print("「新入荷＆在庫更新情報」の新しい更新はありませんでした。")
         return
 
-    # 最新の最大3件を送信
+    # 最新の最大3件を対象
     send_targets = new_items[:3]
     text_messages = []
 
     for title, link, _ in send_targets:
-        # ごちゃごちゃした文章を削ぎ落とし、商品単体タイトルとURLのみ送信
+        # 正しい商品リンクとタイトルのみを組み立てて送信
         msg_text = f"【新着・在庫更新】\n{title}\n\n{link}"
         text_messages.append(TextMessage(text=msg_text))
 
@@ -135,7 +148,7 @@ def main():
             line_bot_api.push_message(push_message_request)
         
         mark_as_seen([(key, title) for title, _, key in send_targets])
-        print(f"★混ざりを解消し、商品ごとに綺麗に{len(send_targets)}件送信しました！")
+        print(f"★新入荷枠のみを正しく検出し、{len(send_targets)}件送信しました！")
     except Exception as e:
         print(f"★送信エラー: {e}")
 
