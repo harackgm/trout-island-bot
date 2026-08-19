@@ -33,9 +33,12 @@ def force_https(url_str):
     return url_str
 
 def create_flex_message(title, link, img_url):
-    # LINE API仕様対策: 必ずhttps://へ強制変換
     link = force_https(link)
     img_url = force_https(img_url)
+
+    # 画像URLが空または不鮮明な場合のフォールバック（LINE側で確実に表示できるHTTPS画像）
+    if not img_url or not img_url.startswith("https://"):
+        img_url = "https://img07.shop-pro.jp/PA01271/083/etc/logo.png"
 
     return {
         "type": "bubble",
@@ -111,11 +114,11 @@ def test_single_send():
         if href in ['/', '#', 'javascript:void(0);'] or 'cart' in href or 'myaccount' in href:
             continue
 
-        full_url = urljoin(TARGET_URL, href)
+        full_url = force_https(urljoin(TARGET_URL, href))
         
         img_tag = a.find('img')
         if img_tag and img_tag.get('src'):
-            img_url = urljoin(TARGET_URL, img_tag.get('src'))
+            img_url = force_https(urljoin(TARGET_URL, img_tag.get('src')))
         else:
             img_url = "https://img07.shop-pro.jp/PA01271/083/etc/logo.png"
 
@@ -128,8 +131,8 @@ def test_single_send():
 
     title, link, img_url = target_item
     print(f"テスト対象を取得しました: {title}")
-    print(f"送信URL(変換前): {link}")
-    print(f"送信URL(変換後): {force_https(link)}")
+    print(f"送信URL: {link}")
+    print(f"画像URL: {img_url}")
 
     flex_json = create_flex_message(title, link, img_url)
     configuration = Configuration(access_token=CHANNEL_ACCESS_TOKEN)
