@@ -85,7 +85,7 @@ def create_flex_message(title, link, img_url):
             "contents": [
                 {
                     "type": "text",
-                    "text": "【トラウトアイランド 新着通知】",
+                    "text": "【新入荷・在庫更新】",
                     "weight": "bold",
                     "color": "#1DB446",
                     "size": "sm"
@@ -119,6 +119,52 @@ def create_flex_message(title, link, img_url):
         }
     }
 
+def extract_new_arrivals(soup):
+    """新入荷＆在庫更新情報ブロックからリンクを抽出"""
+    items = []
+    
+    # 「新入荷＆在庫更新情報」の文字を探す
+    header_node = soup.find(lambda tag: tag.name in ['td', 'th', 'div', 'b', 'font', 'p'] and '新入荷＆在庫更新情報' in tag.text)
+    
+    if not header_node:
+        return items
+
+    # 親要素を遡って更新情報が含まれるコンテナ要素を取得
+    container = header_node.find_parent(['table', 'div', 'td'])
+    if not container:
+        container = soup
+
+    # エリア内のリンクを巡回
+    for a in container.find_all('a', href=True):
+        href = clean_text(a['href'])
+        
+        # 不要なリンクをスキップ
+        if not href or href in ['/', '#', 'javascript:void(0);'] or 'cart' in href or 'myaccount' in href:
+            continue
+        
+        # 親要素や周辺テキストも含めてタイトルを取得
+        parent_text = clean_text(a.parent.get_text()) if a.parent else ""
+        text = clean_text(a.get_text())
+        
+        # リンクテキストが短すぎる場合（「詳細」など）、親要素のテキストを採用
+        full_title = parent_text if len(parent_text) > len(text) and len(parent_text) < 120 else text
+        
+        if not full_title or len(full_title) < 3:
+            continue
+            
+        full_url = force_https(urljoin(TARGET_URL, href))
+        
+        # 画像取得
+        img_tag = a.find('img')
+        if img_tag and img_tag.get('src'):
+            img_url = force_https(urljoin(TARGET_URL, img_tag.get('src')))
+        else:
+            img_url = "https://img07.shop-pro.jp/PA01271/083/etc/logo.png"
+
+        items.append((full_title, full_url, img_url))
+
+    return items
+
 def main():
     if not CHANNEL_ACCESS_TOKEN or not USER_ID:
         print("エラー: Secretsが設定されていません。")
@@ -135,43 +181,28 @@ def main():
         print(f"サイトアクセスエラー: {e}")
         return
 
+    raw_items = extract_new_arrivals(soup)
+    
+    # 未読アイテムのみ抽出（重複除去）
     new_items = []
-    links = soup.find_all('a', href=True)
-
-    for a in links:
-        title = clean_text(a.get_text())
-        href = clean_text(a['href'])
-
-        if not title or len(title) < 4 or len(title) > 100:
-            continue
-        if href in ['/', '#', 'javascript:void(0);'] or 'cart' in href or 'myaccount' in href:
-            continue
-
-        full_url = force_https(urljoin(TARGET_URL, href))
-        
-        if is_seen(full_url):
-            continue
-
-        img_tag = a.find('img')
-        if img_tag and img_tag.get('src'):
-            img_url = force_https(urljoin(TARGET_URL, img_tag.get('src')))
-        else:
-            img_url = "https://img07.shop-pro.jp/PA01271/083/etc/logo.png"
-
-        new_items.append((title, full_url, img_url))
+    seen_urls = set()
+    for title, url, img_url in raw_items:
+        if url not in seen_urls and not is_seen(url):
+            seen_urls.add(url)
+            new_items.append((title, url, img_url))
 
     if not new_items:
-        print("新しい更新はありませんでした。")
+        print("「新入荷＆在庫更新情報」の新しい更新はありませんでした。")
         return
 
-    # 一度に送信するメッセージを最大5件に制限
+    # 初回または大量検出時は最新最大5件に制限して通知
     send_targets = new_items[:5]
     flex_messages = []
 
     for title, link, img_url in send_targets:
         flex_json = create_flex_message(title, link, img_url)
         flex_container = FlexContainer.from_dict(flex_json)
-        flex_msg = FlexMessage(alt_text=f"新着: {title}", contents=flex_container)
+        flex_msg = FlexMessage(alt_text=f"新入荷: {title}", contents=flex_container)
         flex_messages.append(flex_msg)
 
     configuration = Configuration(access_token=CHANNEL_ACCESS_TOKEN)
@@ -185,9 +216,8 @@ def main():
             )
             line_bot_api.push_message(push_message_request)
         
-        # 送信成功したアイテムのみDBに記録
         mark_as_seen([(url, title) for title, url, _ in send_targets])
-        print(f"★{len(send_targets)}件の更新をLINEへ通知し、DBへ登録しました。")
+        print(f"★「新入荷＆在庫更新情報」から{len(send_targets)}件をLINEへ通知しました。")
     except Exception as e:
         print(f"★送信エラー: {e}")
 
