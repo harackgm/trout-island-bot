@@ -85,7 +85,7 @@ def create_flex_message(title, link, img_url):
             "contents": [
                 {
                     "type": "text",
-                    "text": "【新入荷・在庫更新】",
+                    "text": "【新入荷・在庫更新情報】",
                     "weight": "bold",
                     "color": "#1DB446",
                     "size": "sm"
@@ -120,48 +120,47 @@ def create_flex_message(title, link, img_url):
     }
 
 def extract_new_arrivals(soup):
-    """新入荷＆在庫更新情報ブロックからリンクを抽出"""
+    """「新入荷＆在庫更新情報」の枠内から更新行を正確に解析して取得"""
     items = []
     
-    # 「新入荷＆在庫更新情報」の文字を探す
-    header_node = soup.find(lambda tag: tag.name in ['td', 'th', 'div', 'b', 'font', 'p'] and '新入荷＆在庫更新情報' in tag.text)
-    
-    if not header_node:
+    # 「新入荷＆在庫更新情報」を含む要素を探す
+    target_node = soup.find(lambda tag: '新入荷＆在庫更新情報' in tag.text if tag.text else False)
+    if not target_node:
         return items
 
-    # 親要素を遡って更新情報が含まれるコンテナ要素を取得
-    container = header_node.find_parent(['table', 'div', 'td'])
-    if not container:
-        container = soup
+    # 親のテーブル枠を取得
+    parent_box = target_node.find_parent(['td', 'table', 'div'])
+    if not parent_box:
+        parent_box = soup
 
-    # エリア内のリンクを巡回
-    for a in container.find_all('a', href=True):
-        href = clean_text(a['href'])
-        
-        # 不要なリンクをスキップ
-        if not href or href in ['/', '#', 'javascript:void(0);'] or 'cart' in href or 'myaccount' in href:
-            continue
-        
-        # 親要素や周辺テキストも含めてタイトルを取得
-        parent_text = clean_text(a.parent.get_text()) if a.parent else ""
-        text = clean_text(a.get_text())
-        
-        # リンクテキストが短すぎる場合（「詳細」など）、親要素のテキストを採用
-        full_title = parent_text if len(parent_text) > len(text) and len(parent_text) < 120 else text
-        
-        if not full_title or len(full_title) < 3:
-            continue
-            
-        full_url = force_https(urljoin(TARGET_URL, href))
-        
-        # 画像取得
-        img_tag = a.find('img')
-        if img_tag and img_tag.get('src'):
-            img_url = force_https(urljoin(TARGET_URL, img_tag.get('src')))
-        else:
+    # 枠内のテキストを行ごとに分離（日付「M/D」が含まれる行を探す）
+    lines = parent_box.get_text().split('\n')
+    
+    # 枠内のリンク一覧（フォールバック用）
+    links_in_box = parent_box.find_all('a', href=True)
+    
+    for line in lines:
+        cleaned_line = clean_text(line)
+        # 「8/19」等の日付パターンが含まれている行をターゲットにする
+        if re.search(r'\d{1,2}/\d{1,2}', cleaned_line) and len(cleaned_line) > 5:
+            # 該当行に関連するリンクを探す
+            item_url = TARGET_URL
             img_url = "https://img07.shop-pro.jp/PA01271/083/etc/logo.png"
 
-        items.append((full_title, full_url, img_url))
+            for a in links_in_box:
+                a_text = clean_text(a.get_text())
+                # リンクテキストが更新行のキーワードと一部一致する場合、そのURLを採用
+                if a_text and (a_text in cleaned_line or any(w in a_text for w in cleaned_line.split() if len(w) > 2)):
+                    href = a['href']
+                    if href not in ['/', '#'] and 'cart' not in href:
+                        item_url = force_https(urljoin(TARGET_URL, href))
+                        img_tag = a.find('img')
+                        if img_tag and img_tag.get('src'):
+                            img_url = force_https(urljoin(TARGET_URL, img_tag.get('src')))
+                        break
+
+            # 重複防止識別キーとしてタイトルとURLを使用
+            items.append((cleaned_line, item_url, img_url))
 
     return items
 
@@ -183,23 +182,24 @@ def main():
 
     raw_items = extract_new_arrivals(soup)
     
-    # 未読アイテムのみ抽出（重複除去）
     new_items = []
     seen_urls = set()
     for title, url, img_url in raw_items:
-        if url not in seen_urls and not is_seen(url):
-            seen_urls.add(url)
-            new_items.append((title, url, img_url))
+        # タイトル+URLをユニークキーとしてチェック
+        unique_key = f"{url}#{title}"
+        if unique_key not in seen_urls and not is_seen(unique_key):
+            seen_urls.add(unique_key)
+            new_items.append((title, url, img_url, unique_key))
 
     if not new_items:
         print("「新入荷＆在庫更新情報」の新しい更新はありませんでした。")
         return
 
-    # 初回または大量検出時は最新最大5件に制限して通知
+    # 最新の最大5件をLINEへ送信
     send_targets = new_items[:5]
     flex_messages = []
 
-    for title, link, img_url in send_targets:
+    for title, link, img_url, _ in send_targets:
         flex_json = create_flex_message(title, link, img_url)
         flex_container = FlexContainer.from_dict(flex_json)
         flex_msg = FlexMessage(alt_text=f"新入荷: {title}", contents=flex_container)
@@ -216,7 +216,8 @@ def main():
             )
             line_bot_api.push_message(push_message_request)
         
-        mark_as_seen([(url, title) for title, url, _ in send_targets])
+        # 通知したアイテムを記録
+        mark_as_seen([(key, title) for title, _, _, key in send_targets])
         print(f"★「新入荷＆在庫更新情報」から{len(send_targets)}件をLINEへ通知しました。")
     except Exception as e:
         print(f"★送信エラー: {e}")
