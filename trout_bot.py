@@ -1,7 +1,8 @@
 import os
 import requests
-from bs4 import BeautifulSoup
+import re
 from urllib.parse import urljoin
+from bs4 import BeautifulSoup
 
 # LINE Messaging API v3
 from linebot.v3.messaging import (
@@ -16,6 +17,13 @@ from linebot.v3.messaging import (
 CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN', '').strip()
 USER_ID = os.environ.get('LINE_USER_ID', '').strip()
 TARGET_URL = "https://troutisland.shop-pro.jp/"
+
+def clean_text(text):
+    if not text:
+        return ""
+    text = re.sub(r'[\r\n\t]+', ' ', text)
+    text = re.sub(r'\s+', ' ', text)
+    return text.strip()
 
 def create_flex_message(title, link, img_url):
     if link.startswith("http://"):
@@ -38,7 +46,7 @@ def create_flex_message(title, link, img_url):
             "contents": [
                 {
                     "type": "text",
-                    "text": "【テスト通知】",
+                    "text": "【テスト・最新更新通知】",
                     "weight": "bold",
                     "color": "#1DB446",
                     "size": "sm"
@@ -63,7 +71,7 @@ def create_flex_message(title, link, img_url):
                     "height": "sm",
                     "action": {
                         "type": "uri",
-                        "label": "商品ページを見る",
+                        "label": "更新ページを見る",
                         "uri": link
                     }
                 }
@@ -77,23 +85,47 @@ def test_single_send():
         return
 
     headers = {"User-Agent": "Mozilla/5.0"}
-    response = requests.get(TARGET_URL, headers=headers, timeout=10)
-    response.encoding = response.apparent_encoding
-    soup = BeautifulSoup(response.text, "html.parser")
-
-    item_box = soup.find("li", class_="product_item")
-    if not item_box:
-        print("商品が見つかりませんでした。")
+    try:
+        response = requests.get(TARGET_URL, headers=headers, timeout=10)
+        response.encoding = response.apparent_encoding
+        soup = BeautifulSoup(response.text, "html.parser")
+    except Exception as e:
+        print(f"サイトアクセスエラー: {e}")
         return
 
-    title_tag = item_box.find("a")
-    img_tag = item_box.find("img")
+    # ページ内のすべてのリンクから最新の更新枠（FORODOX等）を検索
+    target_item = None
+    links = soup.find_all('a', href=True)
 
-    title = title_tag.get_text(strip=True)
-    link = urljoin(TARGET_URL, title_tag.get("href"))
-    img_url = urljoin(TARGET_URL, img_tag.get("src"))
+    for a in links:
+        title = clean_text(a.get_text())
+        href = clean_text(a['href'])
 
+        # タイトル長チェック & 無効リンク除外
+        if not title or len(title) < 4 or len(title) > 100:
+            continue
+        if href in ['/', '#', 'javascript:void(0);'] or 'cart' in href or 'myaccount' in href:
+            continue
+
+        full_url = urljoin(TARGET_URL, href)
+        
+        # 内包されている画像を探す（無ければショップのロゴ画像を代替使用）
+        img_tag = a.find('img')
+        if img_tag and img_tag.get('src'):
+            img_url = urljoin(TARGET_URL, img_tag.get('src'))
+        else:
+            img_url = "https://img07.shop-pro.jp/PA01271/083/etc/logo.png"
+
+        target_item = (title, full_url, img_url)
+        break
+
+    if not target_item:
+        print("更新対象が見つかりませんでした。")
+        return
+
+    title, link, img_url = target_item
     print(f"テスト対象を取得しました: {title}")
+    print(f"送信URL: {link}")
 
     flex_json = create_flex_message(title, link, img_url)
     configuration = Configuration(access_token=CHANNEL_ACCESS_TOKEN)
