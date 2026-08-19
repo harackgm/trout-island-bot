@@ -44,6 +44,15 @@ def init_db():
     conn.commit()
     conn.close()
 
+def is_db_empty():
+    """DBが空（初回起動）かどうかを判定"""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('SELECT COUNT(*) FROM seen_items')
+    count = c.fetchone()[0]
+    conn.close()
+    return count == 0
+
 def generate_key(url, title):
     """URLとテキストを組み合わせた一意の識別キーを生成"""
     raw_str = f"{url}_{title}"
@@ -199,6 +208,17 @@ def main():
 
     raw_items = extract_updates(soup)
     
+    # DBが空（初回）の場合は、現在サイトにある全商品を通知せずに「すべて既読」として一括登録する
+    if is_db_empty():
+        all_to_mark = []
+        for title, url in raw_items:
+            item_key = generate_key(url, title)
+            all_to_mark.append((item_key, url, title))
+        mark_as_seen(all_to_mark)
+        print(f"【初期化完了】現在掲載されている全 {len(all_to_mark)} 件の商品を既読登録しました。通知は送信されません。")
+        return
+
+    # 通常運用：新着アイテムのみを検出
     new_items = []
     seen_keys = set()
     
@@ -233,7 +253,6 @@ def main():
     try:
         with ApiClient(configuration) as api_client:
             line_bot_api = MessagingApi(api_client)
-            # 自分のみ宛てに送信
             push_message_request = PushMessageRequest(
                 to=USER_ID,
                 messages=[flex_msg]
