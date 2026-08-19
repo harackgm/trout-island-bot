@@ -32,12 +32,9 @@ def init_db():
     conn.close()
 
 def clean_text(text):
-    """改行・タブ・連続空白をすべて1つのスペースに変換してサニタイズ"""
     if not text:
         return ""
-    # 改行(\r, \n)やタブ(\t)をスペースに置換
     text = re.sub(r'[\r\n\t]+', ' ', text)
-    # 連続するスペースを1つに縮小
     text = re.sub(r'\s+', ' ', text)
     return text.strip()
 
@@ -46,9 +43,8 @@ def check_new_items():
         print("エラー: LINE_CHANNEL_ACCESS_TOKEN または LINE_USER_ID が設定されていません。")
         return
 
-    # 前後の空白や改行を除去
-    token = CHANNEL_ACCESS_TOKEN.strip() if CHANNEL_ACCESS_TOKEN else ""
-    user_id = USER_ID.strip() if USER_ID else ""
+    token = CHANNEL_ACCESS_TOKEN.strip()
+    user_id = USER_ID.strip()
 
     configuration = Configuration(access_token=token)
     
@@ -67,39 +63,33 @@ def check_new_items():
 
     links = soup.find_all('a', href=True)
     
-    target_item = None
+    new_items_found = 0
 
     for a in links:
         raw_href = a['href']
         raw_title = a.get_text()
         
-        # 文字列の完全クレンジング
         title = clean_text(raw_title)
         href = clean_text(raw_href)
         
-        if not title or len(title) < 4 or len(title) > 100:
+        # 【重要】個別商品ページ（/?pid=）以外はLINEのプレビュー生成エラーになるためスキップ
+        if '/?pid=' not in href:
             continue
             
-        if href in ['/', '#', 'javascript:void(0);'] or 'cart' in href or 'myaccount' in href:
+        if not title or len(title) < 2:
             continue
 
         full_url = urljoin(BASE_URL, href)
         if full_url.startswith('http://'):
             full_url = full_url.replace('http://', 'https://', 1)
-            
-        if not full_url.startswith('https://'):
+
+        # DB未登録の商品かチェック
+        cursor.execute('SELECT url FROM products WHERE url = ?', (full_url,))
+        if cursor.fetchone():
             continue
 
-        target_item = (full_url, title)
-        break
-
-    if target_item:
-        full_url, title = target_item
-        print(f"テスト対象を取得しました: {repr(title)}")
-        print(f"送信URL: {repr(full_url)}")
-        
-        # メッセージ本文（改行は \n のみを使用）
-        message_text = f"【動作テスト・最新更新】\n・{title}\n\n{full_url}"
+        # 未登録の個別商品を発見した場合のみLINE送信
+        message_text = f"【新着・在庫更新】\n{title}\n\n{full_url}"
         
         try:
             with ApiClient(configuration) as api_client:
@@ -110,16 +100,21 @@ def check_new_items():
                 )
                 line_bot_api.push_message(push_message_request)
                 
-            cursor.execute('INSERT OR REPLACE INTO products (url, title) VALUES (?, ?)', (full_url, title))
+            # 送信成功した時だけ DB に保存
+            cursor.execute('INSERT INTO products (url, title) VALUES (?, ?)', (full_url, title))
             conn.commit()
-            print("LINEへのテスト通知が成功しました！DBに登録完了。")
+            print(f"通知成功: {title}")
+            new_items_found += 1
             
         except Exception as e:
-            print(f"LINE API送信エラーが発生しました: {e}")
-    else:
-        print("更新リンクが見つかりませんでした。")
+            print(f"LINE API送信エラー ({title}): {e}")
 
     conn.close()
+    
+    if new_items_found == 0:
+        print("新着・未通知の個別商品は見つかりませんでした。")
+    else:
+        print(f"{new_items_found}件の個別商品をLINEへ通知しました。")
 
 if __name__ == '__main__':
     init_db()
