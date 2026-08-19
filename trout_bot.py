@@ -18,7 +18,9 @@ from linebot.v3.messaging import (
 CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN', '').strip()
 USER_ID = os.environ.get('LINE_USER_ID', '').strip()
 TARGET_URL = "https://troutisland.shop-pro.jp/"
-DEFAULT_IMG = "https://img07.shop-pro.jp/PA01271/083/etc/logo.png"
+
+# LINE Flex Messageで確実に表示される公開用画像（緑のショップアイコン風画像）
+DEFAULT_IMG = "https://raw.githubusercontent.com/line/line-images/master/blogs/20200806/logo.png"
 DB_FILE = "data.db"
 
 def init_db():
@@ -118,42 +120,40 @@ def create_flex_message(title, link, img_url):
     }
 
 def extract_updates(soup):
-    """HTML全体のテキスト行から日付入りの新着行と、そのリンク・画像を抽出"""
+    """新入荷・在庫更新情報枠から更新テキストと正確な個別商品/カテゴリURLを抽出"""
     items = []
 
-    # ページ内のすべてのリンクタグを取得
-    all_links = soup.find_all('a', href=True)
+    # 全体のリンク要素を取得
+    all_a_tags = soup.find_all('a', href=True)
 
-    # ページ全体のテキストを行単位に分割
-    raw_text = soup.get_text()
-    lines = [clean_text(l) for l in raw_text.split('\n') if clean_text(l)]
+    # ページ全体のテキストブロックを取得
+    for a in all_a_tags:
+        href = clean_text(a['href'])
+        text = clean_text(a.get_text())
+        parent_text = clean_text(a.parent.get_text()) if a.parent else ""
 
-    for line in lines:
-        # 「8/19」や「08/19」などの日付が含まれる行を特定
-        if re.search(r'\d{1,2}/\d{1,2}', line) and len(line) > 5:
-            matched_url = TARGET_URL
-            matched_img = DEFAULT_IMG
+        # 無効なリンクを除外
+        if not href or href in ['/', '#'] or 'cart' in href or 'myaccount' in href:
+            continue
 
-            # 行の文字列に該当するリンクを探す
-            for a in all_links:
-                href = a['href']
-                a_text = clean_text(a.get_text())
+        # 日付パターン（M/D）が含まれる要素を検出
+        title = ""
+        if re.search(r'\d{1,2}/\d{1,2}', text):
+            title = text
+        elif re.search(r'\d{1,2}/\d{1,2}', parent_text):
+            title = parent_text
 
-                if not href or href in ['/', '#'] or 'cart' in href or 'myaccount' in href:
-                    continue
+        if title and len(title) > 5:
+            full_url = force_https(urljoin(TARGET_URL, href))
+            
+            # 画像タグの検出
+            img_tag = a.find('img') or (a.parent.find('img') if a.parent else None)
+            if img_tag and img_tag.get('src'):
+                img_url = force_https(urljoin(TARGET_URL, img_tag.get('src')))
+            else:
+                img_url = DEFAULT_IMG
 
-                # リンクテキストが行内に含まれている、またはURLがカテゴリ/商品を示している場合
-                if (a_text and a_text in line) or ('mode=' in href or 'pid=' in href):
-                    # 行内の単語と一部一致するか検証
-                    words = [w for w in line.split() if len(w) > 1]
-                    if any(w in a_text for w in words):
-                        matched_url = force_https(urljoin(TARGET_URL, href))
-                        img_tag = a.find('img')
-                        if img_tag and img_tag.get('src'):
-                            matched_img = force_https(urljoin(TARGET_URL, img_tag.get('src')))
-                        break
-
-            items.append((line, matched_url, matched_img))
+            items.append((title, full_url, img_url))
 
     return items
 
@@ -175,7 +175,6 @@ def main():
 
     raw_items = extract_updates(soup)
     
-    # 最新の3件を抽出
     new_items = []
     seen_keys = set()
     for title, url, img_url in raw_items:
@@ -188,7 +187,7 @@ def main():
         print("「新入荷＆在庫更新情報」の新しい更新はありませんでした。")
         return
 
-    # テストとして最新最大3件を送信
+    # テスト用として最新3件を送信
     send_targets = new_items[:3]
     flex_messages = []
 
@@ -210,7 +209,7 @@ def main():
             line_bot_api.push_message(push_message_request)
         
         mark_as_seen([(key, title) for title, _, _, key in send_targets])
-        print(f"★新着更新情報を{len(send_targets)}件、LINEへ送信しました！")
+        print(f"★商品更新情報を{len(send_targets)}件、LINEへ送信しました！")
     except Exception as e:
         print(f"★送信エラー: {e}")
 
