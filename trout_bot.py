@@ -11,15 +11,12 @@ from linebot.v3.messaging import (
     ApiClient,
     MessagingApi,
     PushMessageRequest,
-    FlexMessage,
-    FlexContainer
+    TextMessage
 )
 
 CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN', '').strip()
 USER_ID = os.environ.get('LINE_USER_ID', '').strip()
 TARGET_URL = "https://troutisland.shop-pro.jp/"
-
-DEFAULT_IMG = "https://raw.githubusercontent.com/line/line-images/master/blogs/20200806/logo.png"
 DB_FILE = "data.db"
 
 def init_db():
@@ -65,66 +62,9 @@ def force_https(url_str):
         return "https://" + url_str[7:]
     return url_str
 
-def create_flex_message(title, link, img_url):
-    link = force_https(link)
-    img_url = force_https(img_url) if img_url else DEFAULT_IMG
-
-    # 長文によるFlex Message容量オーバー（30KB制限）を防ぐためタイトルを最大80文字にカット
-    safe_title = title if len(title) <= 80 else title[:77] + "..."
-
-    return {
-        "type": "bubble",
-        "hero": {
-            "type": "image",
-            "url": img_url,
-            "size": "full",
-            "aspectRatio": "20:13",
-            "aspectMode": "cover"
-        },
-        "body": {
-            "type": "box",
-            "layout": "vertical",
-            "contents": [
-                {
-                    "type": "text",
-                    "text": "【新入荷・在庫更新情報】",
-                    "weight": "bold",
-                    "color": "#1DB446",
-                    "size": "sm"
-                },
-                {
-                    "type": "text",
-                    "text": safe_title,
-                    "weight": "bold",
-                    "size": "md",
-                    "wrap": True
-                }
-            ]
-        },
-        "footer": {
-            "type": "box",
-            "layout": "vertical",
-            "spacing": "sm",
-            "contents": [
-                {
-                    "type": "button",
-                    "style": "primary",
-                    "color": "#1DB446",
-                    "height": "sm",
-                    "action": {
-                        "type": "uri",
-                        "label": "商品ページを開く",
-                        "uri": link
-                    }
-                }
-            ]
-        }
-    }
-
 def extract_updates(soup):
-    """新入荷・在庫更新情報枠から更新テキストと正確な個別商品/カテゴリURLを抽出"""
+    """新入荷・在庫更新情報から更新内容と個別の商品URLを抽出"""
     items = []
-
     all_a_tags = soup.find_all('a', href=True)
 
     for a in all_a_tags:
@@ -134,17 +74,10 @@ def extract_updates(soup):
         if not href or href in ['/', '#'] or 'cart' in href or 'myaccount' in href:
             continue
 
-        # 日付（M/D）を含むテキストリンクのみを精密抽出
+        # 日付（M/D）を含むリンクテキストを抽出
         if re.search(r'\d{1,2}/\d{1,2}', text) and len(text) >= 5:
             full_url = force_https(urljoin(TARGET_URL, href))
-            
-            img_tag = a.find('img')
-            if img_tag and img_tag.get('src'):
-                img_url = force_https(urljoin(TARGET_URL, img_tag.get('src')))
-            else:
-                img_url = DEFAULT_IMG
-
-            items.append((text, full_url, img_url))
+            items.append((text, full_url))
 
     return items
 
@@ -168,26 +101,24 @@ def main():
     
     new_items = []
     seen_keys = set()
-    for title, url, img_url in raw_items:
+    for title, url in raw_items:
         key = f"{title}_{url}"
         if key not in seen_keys:
             seen_keys.add(key)
-            new_items.append((title, url, img_url, key))
+            new_items.append((title, url, key))
 
     if not new_items:
         print("「新入荷＆在庫更新情報」の新しい更新はありませんでした。")
         return
 
+    # 最新の最大3件を送信
     send_targets = new_items[:3]
-    flex_messages = []
+    text_messages = []
 
-    for title, link, img_url, _ in send_targets:
-        flex_json = create_flex_message(title, link, img_url)
-        flex_container = FlexContainer.from_dict(flex_json)
-        
-        safe_alt = f"新着: {title}"[:40]
-        flex_msg = FlexMessage(alt_text=safe_alt, contents=flex_container)
-        flex_messages.append(flex_msg)
+    for title, link, _ in send_targets:
+        # 画像のように【新着・在庫更新】＋タイトル＋改行＋URLのテキスト形式を作成
+        msg_text = f"【新着・在庫更新】\n{title}\n\n{link}"
+        text_messages.append(TextMessage(text=msg_text))
 
     configuration = Configuration(access_token=CHANNEL_ACCESS_TOKEN)
 
@@ -196,12 +127,12 @@ def main():
             line_bot_api = MessagingApi(api_client)
             push_message_request = PushMessageRequest(
                 to=USER_ID,
-                messages=flex_messages
+                messages=text_messages
             )
             line_bot_api.push_message(push_message_request)
         
-        mark_as_seen([(key, title) for title, _, _, key in send_targets])
-        print(f"★容量制限を回避し、{len(send_targets)}件をLINEへ正常送信しました！")
+        mark_as_seen([(key, title) for title, _, key in send_targets])
+        print(f"★自動サムネイル形式で{len(send_targets)}件をLINEへ送信しました！")
     except Exception as e:
         print(f"★送信エラー: {e}")
 
