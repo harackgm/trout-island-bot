@@ -19,7 +19,7 @@ CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN', '').strip()
 USER_ID = os.environ.get('LINE_USER_ID', '').strip()
 TARGET_URL = "https://troutisland.shop-pro.jp/"
 
-# LINE Flex Messageで確実に表示される公開用画像（緑のショップアイコン風画像）
+# LINEで確実に表示可能なデフォルト画像（ロゴ等）
 DEFAULT_IMG = "https://raw.githubusercontent.com/line/line-images/master/blogs/20200806/logo.png"
 DB_FILE = "data.db"
 
@@ -123,20 +123,17 @@ def extract_updates(soup):
     """新入荷・在庫更新情報枠から更新テキストと正確な個別商品/カテゴリURLを抽出"""
     items = []
 
-    # 全体のリンク要素を取得
     all_a_tags = soup.find_all('a', href=True)
 
-    # ページ全体のテキストブロックを取得
     for a in all_a_tags:
         href = clean_text(a['href'])
         text = clean_text(a.get_text())
         parent_text = clean_text(a.parent.get_text()) if a.parent else ""
 
-        # 無効なリンクを除外
+        # 不要・無効なナビゲーションリンクをスキップ
         if not href or href in ['/', '#'] or 'cart' in href or 'myaccount' in href:
             continue
 
-        # 日付パターン（M/D）が含まれる要素を検出
         title = ""
         if re.search(r'\d{1,2}/\d{1,2}', text):
             title = text
@@ -146,7 +143,7 @@ def extract_updates(soup):
         if title and len(title) > 5:
             full_url = force_https(urljoin(TARGET_URL, href))
             
-            # 画像タグの検出
+            # 画像URLの取得
             img_tag = a.find('img') or (a.parent.find('img') if a.parent else None)
             if img_tag and img_tag.get('src'):
                 img_url = force_https(urljoin(TARGET_URL, img_tag.get('src')))
@@ -187,14 +184,18 @@ def main():
         print("「新入荷＆在庫更新情報」の新しい更新はありませんでした。")
         return
 
-    # テスト用として最新3件を送信
+    # テストとして最新3件を送信
     send_targets = new_items[:3]
     flex_messages = []
 
     for title, link, img_url, _ in send_targets:
         flex_json = create_flex_message(title, link, img_url)
         flex_container = FlexContainer.from_dict(flex_json)
-        flex_msg = FlexMessage(alt_text=f"新着: {title}", contents=flex_container)
+        
+        # alt_textの文字数を40文字に安全カットして文字数制限エラーを防ぐ
+        safe_alt = f"新着: {title}"[:40]
+        
+        flex_msg = FlexMessage(alt_text=safe_alt, contents=flex_container)
         flex_messages.append(flex_msg)
 
     configuration = Configuration(access_token=CHANNEL_ACCESS_TOKEN)
@@ -209,7 +210,7 @@ def main():
             line_bot_api.push_message(push_message_request)
         
         mark_as_seen([(key, title) for title, _, _, key in send_targets])
-        print(f"★商品更新情報を{len(send_targets)}件、LINEへ送信しました！")
+        print(f"★文字数制限を回避し、{len(send_targets)}件をLINEへ無事送信しました！")
     except Exception as e:
         print(f"★送信エラー: {e}")
 
