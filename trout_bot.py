@@ -11,13 +11,12 @@ from linebot.v3.messaging import (
     Configuration,
     ApiClient,
     MessagingApi,
-    PushMessageRequest,
+    BroadcastRequest,
     FlexMessage,
     FlexContainer
 )
 
 CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN', '').strip()
-USER_ID = os.environ.get('LINE_USER_ID', '').strip()
 TARGET_URL = "https://troutisland.shop-pro.jp/"
 DB_FILE = "products.db"
 DEFAULT_IMG = "https://raw.githubusercontent.com/line/line-images/master/blogs/20200806/logo.png"
@@ -173,8 +172,8 @@ def extract_updates(soup):
     return items
 
 def main():
-    if not CHANNEL_ACCESS_TOKEN or not USER_ID:
-        print("エラー: Secrets (LINE_CHANNEL_ACCESS_TOKEN または LINE_USER_ID) が設定されていません。")
+    if not CHANNEL_ACCESS_TOKEN:
+        print("エラー: Secrets LINE_CHANNEL_ACCESS_TOKEN が設定されていません。")
         return
 
     init_db()
@@ -225,14 +224,12 @@ def main():
     try:
         with ApiClient(configuration) as api_client:
             line_bot_api = MessagingApi(api_client)
-            push_message_request = PushMessageRequest(
-                to=USER_ID,
-                messages=[flex_msg]
-            )
-            line_bot_api.push_message(push_message_request)
+            # 登録者全員へ一斉送信
+            broadcast_request = BroadcastRequest(messages=[flex_msg])
+            line_bot_api.broadcast(broadcast_request)
         
         mark_as_seen([(item_key, url, title) for item_key, title, url in send_targets])
-        print(f"★管理個人のみへ新着・在庫更新 {len(send_targets)}件のカルーセル通知を送信しました。")
+        print(f"★全登録者へ新着・在庫更新 {len(send_targets)}件のカルーセル通知を一括送信しました。")
     except Exception as e:
         print(f"★送信エラー: {e}")
 
