@@ -11,12 +11,13 @@ from linebot.v3.messaging import (
     Configuration,
     ApiClient,
     MessagingApi,
-    BroadcastRequest,
+    PushMessageRequest,
     FlexMessage,
     FlexContainer
 )
 
 CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN', '').strip()
+USER_ID = os.environ.get('LINE_USER_ID', '').strip()
 TARGET_URL = "https://troutisland.shop-pro.jp/"
 DB_FILE = "products.db"
 DEFAULT_IMG = "https://raw.githubusercontent.com/line/line-images/master/blogs/20200806/logo.png"
@@ -25,7 +26,7 @@ def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     
-    # テーブル構造の確認と自動マイグレーション（旧テーブルがある場合は再作成）
+    # 旧構造テーブルの自動検出＆再構築
     c.execute("PRAGMA table_info(seen_items)")
     columns = [column[1] for column in c.fetchall()]
     
@@ -57,7 +58,6 @@ def is_seen(item_key):
     return row is not None
 
 def mark_as_seen(items):
-    """(item_key, url, title) のトリプルを記録"""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     for item_key, url, title in items:
@@ -182,8 +182,8 @@ def extract_updates(soup):
     return items
 
 def main():
-    if not CHANNEL_ACCESS_TOKEN:
-        print("エラー: LINE_CHANNEL_ACCESS_TOKEN が設定されていません。")
+    if not CHANNEL_ACCESS_TOKEN or not USER_ID:
+        print("エラー: Secrets (LINE_CHANNEL_ACCESS_TOKEN または LINE_USER_ID) が設定されていません。")
         return
 
     init_db()
@@ -233,12 +233,15 @@ def main():
     try:
         with ApiClient(configuration) as api_client:
             line_bot_api = MessagingApi(api_client)
-            broadcast_request = BroadcastRequest(messages=[flex_msg])
-            line_bot_api.broadcast(broadcast_request)
+            # 自分のみ宛てに送信
+            push_message_request = PushMessageRequest(
+                to=USER_ID,
+                messages=[flex_msg]
+            )
+            line_bot_api.push_message(push_message_request)
         
-        # 正しいデータ構造でDBに記録
         mark_as_seen([(item_key, url, title) for item_key, title, url in send_targets])
-        print(f"★全登録者へ新着・在庫更新 {len(send_targets)}件のカルーセル通知を一括送信しました。")
+        print(f"★管理個人のみへ新着・在庫更新 {len(send_targets)}件のカルーセル通知を送信しました。")
     except Exception as e:
         print(f"★送信エラー: {e}")
 
