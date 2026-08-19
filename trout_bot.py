@@ -3,7 +3,7 @@ import sqlite3
 import requests
 from bs4 import BeautifulSoup
 
-# LINE Messaging API v3 用のインポート
+# LINE Messaging API v3 用のインポート（例外は一般的な Exception で受けるため除外）
 from linebot.v3.messaging import (
     Configuration,
     ApiClient,
@@ -11,7 +11,6 @@ from linebot.v3.messaging import (
     PushMessageRequest,
     TextMessage
 )
-from linebot.v3.exceptions import ApiException
 
 # 環境変数から取得
 CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
@@ -115,8 +114,8 @@ def check_new_items():
                         
                     print(f"通知送信: {title}")
                     new_items_found += 1
-                except ApiException as e:
-                    print(f"LINE APIエラー: {e}")
+                except Exception as e:
+                    print(f"LINE API送信エラー: {e}")
 
     conn.close()
     
