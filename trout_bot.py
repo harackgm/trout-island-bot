@@ -25,6 +25,15 @@ def init_db():
     conn.commit()
     conn.close()
 
+def is_db_empty():
+    """DBが空かどうかを判定（初回起動チェック）"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('SELECT COUNT(*) FROM notified_products')
+    count = cursor.fetchone()[0]
+    conn.close()
+    return count == 0
+
 def is_notified(item_key):
     """通知済みか確認"""
     conn = sqlite3.connect(DB_PATH)
@@ -115,7 +124,7 @@ def send_individual_line_notification(title, url_link):
 
 def main():
     init_db()
-    print("トラウトアイランドの巡回チェック（HTMLソース直解析モード）を開始します...")
+    print("トラウトアイランドの巡回チェック（ノイズ除去＆初回自動同期モード）を開始します...")
 
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -138,7 +147,7 @@ def main():
         if "?pid=" in raw_line or re.search(r'\d{1,2}/\d{1,2}', raw_line):
             line_soup = BeautifulSoup(raw_line, "html.parser")
             
-            # HTMLタグを除去して「8/18 ムカイ ホソマキ 新色入荷！」という繋がった全文を取得
+            # HTMLタグを除去
             full_text = line_soup.get_text()
             clean_text = re.sub(r'\s+', ' ', full_text).strip()
             
@@ -149,11 +158,21 @@ def main():
             else:
                 product_url = TARGET_URL
 
-            # ノイズ防止（短すぎる行やメニュー系をスキップ）
-            if len(clean_text) > 4 and not clean_text.startswith("http"):
+            # 【重要ノイズ除去】
+            # 文字数が5文字未満、または150文字を超えるような巨大な塊（サイトマップ等）は除外
+            if 5 <= len(clean_text) <= 150 and not clean_text.startswith("http"):
                 extracted_items.append((clean_text, product_url))
 
-    print(f"抽出された更新情報件数: {len(extracted_items)}件")
+    print(f"抽出された有効な更新情報件数: {len(extracted_items)}件")
+
+    # 初回実行時（DBが空の場合）は、現在の全商品を一括して「既読」にして通知をスキップする
+    first_run = is_db_empty()
+    if first_run:
+        print("初回起動（またはDBリセット後）を検知しました。現在の既存商品をすべて通知済みに設定します...")
+        for title, _ in extracted_items:
+            save_notified(title)
+        print("ベースラインの設定が完了しました。次回更新分よりLINE通知されます。")
+        return
 
     seen = set()
     for title, url_link in extracted_items:
