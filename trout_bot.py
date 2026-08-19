@@ -10,13 +10,12 @@ from linebot.v3.messaging import (
     Configuration,
     ApiClient,
     MessagingApi,
-    PushMessageRequest,
+    BroadcastRequest,
     FlexMessage,
     FlexContainer
 )
 
 CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN', '').strip()
-USER_ID = os.environ.get('LINE_USER_ID', '').strip()
 TARGET_URL = "https://troutisland.shop-pro.jp/"
 DB_FILE = "data.db"
 DEFAULT_IMG = "https://raw.githubusercontent.com/line/line-images/master/blogs/20200806/logo.png"
@@ -35,7 +34,6 @@ def init_db():
     conn.close()
 
 def is_seen(url):
-    """商品URLのみで既読判定"""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute('SELECT 1 FROM seen_items WHERE url = ?', (url,))
@@ -44,7 +42,6 @@ def is_seen(url):
     return row is not None
 
 def mark_as_seen(items):
-    """(url, title) のペアを記録"""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     for url, title in items:
@@ -86,12 +83,11 @@ def fetch_product_image(product_url, headers):
     return DEFAULT_IMG
 
 def create_bubble(title, link, img_url):
-    """カルーセル内に並べる個々の商品カード（バブル）を作成"""
     safe_title = title if len(title) <= 60 else title[:57] + "..."
     
     return {
         "type": "bubble",
-        "size": "micro",  # カルーセルで見やすいコンパクトサイズ
+        "size": "micro",
         "hero": {
             "type": "image",
             "url": img_url,
@@ -170,8 +166,8 @@ def extract_updates(soup):
     return items
 
 def main():
-    if not CHANNEL_ACCESS_TOKEN or not USER_ID:
-        print("エラー: Secretsが設定されていません。")
+    if not CHANNEL_ACCESS_TOKEN:
+        print("エラー: LINE_CHANNEL_ACCESS_TOKEN が設定されていません。")
         return
 
     init_db()
@@ -199,7 +195,6 @@ def main():
         print("「新入荷＆在庫更新情報」の新しい更新はありませんでした。")
         return
 
-    # 今回のご指示通り、最新最大7件を対象に設定
     send_targets = new_items[:7]
     bubbles = []
 
@@ -208,7 +203,6 @@ def main():
         bubble_json = create_bubble(title, link, img_url)
         bubbles.append(bubble_json)
 
-    # 7件を1つのカルーセル構造に集約
     carousel_json = {
         "type": "carousel",
         "contents": bubbles
@@ -222,14 +216,12 @@ def main():
     try:
         with ApiClient(configuration) as api_client:
             line_bot_api = MessagingApi(api_client)
-            push_message_request = PushMessageRequest(
-                to=USER_ID,
-                messages=[flex_msg]  # 1通のメッセージとして送信
-            )
-            line_bot_api.push_message(push_message_request)
+            # 友だち全員宛て（一括ブロードキャスト送信）
+            broadcast_request = BroadcastRequest(messages=[flex_msg])
+            line_bot_api.broadcast(broadcast_request)
         
         mark_as_seen([(url, title) for title, url in send_targets])
-        print(f"★新着{len(send_targets)}件を1通のカルーセルメッセージで送信しました。")
+        print(f"★全登録者へ新着{len(send_targets)}件のカルーセル通知を一括送信しました。")
     except Exception as e:
         print(f"★送信エラー: {e}")
 
