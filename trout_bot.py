@@ -54,7 +54,7 @@ def get_product_image(product_url):
         res.encoding = res.apparent_encoding
         soup = BeautifulSoup(res.text, "html.parser")
         
-        # og:image タグから高画質画像を取得、無ければimgタグから検索
+        # og:image タグから高画質画像を取得
         og_image = soup.find("meta", property="og:image")
         if og_image and og_image.get("content"):
             return og_image["content"]
@@ -115,7 +115,7 @@ def send_individual_line_notification(title, url_link):
 
 def main():
     init_db()
-    print("トラウトアイランドの巡回チェック（写真付き個別通知モード）を開始します...")
+    print("トラウトアイランドの巡回チェック（HTMLソース直解析モード）を開始します...")
 
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -128,18 +128,30 @@ def main():
         print(f"Webサイトの取得に失敗しました: {e}")
         return
 
-    soup = BeautifulSoup(response.text, "html.parser")
+    # <br> タグで分割して1行ずつ解析
+    html_content = response.text
+    raw_lines = html_content.split('<br>')
     extracted_items = []
-    
-    for a_tag in soup.find_all("a", href=True):
-        text = a_tag.get_text(strip=True)
-        href = a_tag["href"]
-        if re.search(r'\d{1,2}/\d{1,2}', text) or any(kw in text for kw in ["新入荷", "再入荷", "新色", "在庫更新", "ご予約"]):
-            full_url = requests.compat.urljoin(TARGET_URL, href)
-            for line in text.splitlines():
-                line = line.strip()
-                if line:
-                    extracted_items.append((line, full_url))
+
+    for raw_line in raw_lines:
+        # 行内に商品ページへのリンク (?pid=) または 日付 (月/日) が含まれているか判定
+        if "?pid=" in raw_line or re.search(r'\d{1,2}/\d{1,2}', raw_line):
+            line_soup = BeautifulSoup(raw_line, "html.parser")
+            
+            # HTMLタグを除去して「8/18 ムカイ ホソマキ 新色入荷！」という繋がった全文を取得
+            full_text = line_soup.get_text()
+            clean_text = re.sub(r'\s+', ' ', full_text).strip()
+            
+            # リンクURLを取得
+            a_tag = line_soup.find("a", href=True)
+            if a_tag:
+                product_url = requests.compat.urljoin(TARGET_URL, a_tag["href"])
+            else:
+                product_url = TARGET_URL
+
+            # ノイズ防止（短すぎる行やメニュー系をスキップ）
+            if len(clean_text) > 4 and not clean_text.startswith("http"):
+                extracted_items.append((clean_text, product_url))
 
     print(f"抽出された更新情報件数: {len(extracted_items)}件")
 
