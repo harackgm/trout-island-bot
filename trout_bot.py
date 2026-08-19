@@ -63,7 +63,7 @@ def force_https(url_str):
     return url_str
 
 def extract_updates(soup):
-    """新入荷・在庫更新情報から更新内容と個別の商品URLを抽出"""
+    """商品ごとの個別リンクから正確な商品タイトルのみを抽出"""
     items = []
     all_a_tags = soup.find_all('a', href=True)
 
@@ -71,12 +71,15 @@ def extract_updates(soup):
         href = clean_text(a['href'])
         text = clean_text(a.get_text())
 
+        # 不要なナビゲーションやカート領域のリンクを排除
         if not href or href in ['/', '#'] or 'cart' in href or 'myaccount' in href:
             continue
 
-        # 日付（M/D）を含むリンクテキストを抽出
-        if re.search(r'\d{1,2}/\d{1,2}', text) and len(text) >= 5:
+        # 商品ページ(pid=) または カテゴリページ(mode=) へのリンクを対象とする
+        if ('pid=' in href or 'mode=' in href or 'shop-pro.jp' in href) and len(text) >= 3:
             full_url = force_https(urljoin(TARGET_URL, href))
+            
+            # 周囲の余計な文章を排除し、リンク自体の文字（商品名）だけを採用
             items.append((text, full_url))
 
     return items
@@ -116,7 +119,7 @@ def main():
     text_messages = []
 
     for title, link, _ in send_targets:
-        # 画像のように【新着・在庫更新】＋タイトル＋改行＋URLのテキスト形式を作成
+        # ごちゃごちゃした文章を削ぎ落とし、商品単体タイトルとURLのみ送信
         msg_text = f"【新着・在庫更新】\n{title}\n\n{link}"
         text_messages.append(TextMessage(text=msg_text))
 
@@ -132,7 +135,7 @@ def main():
             line_bot_api.push_message(push_message_request)
         
         mark_as_seen([(key, title) for title, _, key in send_targets])
-        print(f"★自動サムネイル形式で{len(send_targets)}件をLINEへ送信しました！")
+        print(f"★混ざりを解消し、商品ごとに綺麗に{len(send_targets)}件送信しました！")
     except Exception as e:
         print(f"★送信エラー: {e}")
 
