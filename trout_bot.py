@@ -2,9 +2,16 @@ import os
 import sqlite3
 import requests
 from bs4 import BeautifulSoup
-from linebot import LineBotApi
-from linebot.models import TextSendMessage
-from linebot.exceptions import LineBotApiError
+
+# LINE Messaging API v3 用のインポート
+from linebot.v3.messaging import (
+    Configuration,
+    ApiClient,
+    MessagingApi,
+    PushMessageRequest,
+    TextMessage
+)
+from linebot.v3.exceptions import ApiException
 
 # 環境変数から取得
 CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
@@ -40,7 +47,8 @@ def check_new_items():
         print("エラー: LINE_CHANNEL_ACCESS_TOKEN または LINE_USER_ID が設定されていません。")
         return
 
-    line_bot_api = LineBotApi(CHANNEL_ACCESS_TOKEN)
+    # LINE v3 APIクライアントの設定
+    configuration = Configuration(access_token=CHANNEL_ACCESS_TOKEN)
     
     print("巡回チェックを開始します...")
     try:
@@ -70,10 +78,8 @@ def check_new_items():
         href = a['href']
         title = a.get_text(strip=True)
         
-        # 【重要フィルタ】
-        # 商品詳細ページ（/?pid= を含むURL）かつ、タイトルが適切（5〜100文字以内）なものだけを抽出
+        # タイトルの長さとURL形式のチェック
         if '/?pid=' in href and title and 5 <= len(title) <= 100:
-            # 相対パスを絶対パス（http...）に変換
             if href.startswith('/'):
                 full_url = TARGET_URL.rstrip('/') + href
             elif href.startswith('http'):
@@ -95,13 +101,22 @@ def check_new_items():
                     continue
 
                 # 送信用テキストを作成（LINE側で自動的にサムネイルカード化されます）
-                message = f"【新着・在庫更新】\n・{title}\n\n{full_url}"
+                message_text = f"【新着・在庫更新】\n・{title}\n\n{full_url}"
+                
+                # LINE v3 APIによるPush送信
                 try:
-                    line_bot_api.push_message(USER_ID, TextSendMessage(text=message))
+                    with ApiClient(configuration) as api_client:
+                        line_bot_api = MessagingApi(api_client)
+                        push_message_request = PushMessageRequest(
+                            to=USER_ID,
+                            messages=[TextMessage(text=message_text)]
+                        )
+                        line_bot_api.push_message(push_message_request)
+                        
                     print(f"通知送信: {title}")
                     new_items_found += 1
-                except LineBotApiError as e:
-                    print(f"LINE通知エラー: {e}")
+                except ApiException as e:
+                    print(f"LINE APIエラー: {e}")
 
     conn.close()
     
