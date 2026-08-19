@@ -10,8 +10,7 @@ from linebot.v3.messaging import (
     ApiClient,
     MessagingApi,
     PushMessageRequest,
-    FlexMessage,
-    FlexContainer
+    TextMessage
 )
 
 CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN', '').strip()
@@ -31,62 +30,6 @@ def force_https(url_str):
     if url_str.startswith("http://"):
         return "https://" + url_str[7:]
     return url_str
-
-def create_flex_message(title, link, img_url):
-    link = force_https(link)
-    img_url = force_https(img_url)
-
-    # 画像URLが空または不鮮明な場合のフォールバック（LINE側で確実に表示できるHTTPS画像）
-    if not img_url or not img_url.startswith("https://"):
-        img_url = "https://img07.shop-pro.jp/PA01271/083/etc/logo.png"
-
-    return {
-        "type": "bubble",
-        "hero": {
-            "type": "image",
-            "url": img_url,
-            "size": "full",
-            "aspectRatio": "20:13",
-            "aspectMode": "cover"
-        },
-        "body": {
-            "type": "box",
-            "layout": "vertical",
-            "contents": [
-                {
-                    "type": "text",
-                    "text": "【テスト・最新更新通知】",
-                    "weight": "bold",
-                    "color": "#1DB446",
-                    "size": "sm"
-                },
-                {
-                    "type": "text",
-                    "text": title,
-                    "weight": "bold",
-                    "size": "md",
-                    "wrap": True
-                }
-            ]
-        },
-        "footer": {
-            "type": "box",
-            "layout": "vertical",
-            "spacing": "sm",
-            "contents": [
-                {
-                    "type": "button",
-                    "style": "link",
-                    "height": "sm",
-                    "action": {
-                        "type": "uri",
-                        "label": "更新ページを見る",
-                        "uri": link
-                    }
-                }
-            ]
-        }
-    }
 
 def test_single_send():
     if not CHANNEL_ACCESS_TOKEN or not USER_ID:
@@ -115,42 +58,32 @@ def test_single_send():
             continue
 
         full_url = force_https(urljoin(TARGET_URL, href))
-        
-        img_tag = a.find('img')
-        if img_tag and img_tag.get('src'):
-            img_url = force_https(urljoin(TARGET_URL, img_tag.get('src')))
-        else:
-            img_url = "https://img07.shop-pro.jp/PA01271/083/etc/logo.png"
-
-        target_item = (title, full_url, img_url)
+        target_item = (title, full_url)
         break
 
     if not target_item:
         print("更新対象が見つかりませんでした。")
         return
 
-    title, link, img_url = target_item
+    title, link = target_item
     print(f"テスト対象を取得しました: {title}")
     print(f"送信URL: {link}")
-    print(f"画像URL: {img_url}")
 
-    flex_json = create_flex_message(title, link, img_url)
+    # シンプルなテキスト本文を作成
+    message_text = f"【テスト通知】\n{title}\n\n{link}"
+
     configuration = Configuration(access_token=CHANNEL_ACCESS_TOKEN)
 
     try:
         with ApiClient(configuration) as api_client:
             line_bot_api = MessagingApi(api_client)
-            flex_container = FlexContainer.from_dict(flex_json)
-            flex_msg = FlexMessage(
-                alt_text=f"テスト通知: {title}", 
-                contents=flex_container
-            )
+            text_msg = TextMessage(text=message_text)
             push_message_request = PushMessageRequest(
                 to=USER_ID,
-                messages=[flex_msg]
+                messages=[text_msg]
             )
             line_bot_api.push_message(push_message_request)
-        print("★テスト送信成功！LINEをご確認ください。")
+        print("★テキストテスト送信成功！LINEをご確認ください。")
     except Exception as e:
         print(f"★送信エラー: {e}")
 
