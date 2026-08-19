@@ -1,6 +1,7 @@
 import os
 import sqlite3
 import requests
+from urllib.parse import urljoin
 from bs4 import BeautifulSoup
 
 # LINE Messaging API v3 用のインポート
@@ -15,7 +16,7 @@ from linebot.v3.messaging import (
 # 環境変数から取得
 CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
 USER_ID = os.environ.get('LINE_USER_ID')
-TARGET_URL = 'http://troutisland.shop-pro.jp/'
+BASE_URL = 'http://troutisland.shop-pro.jp/'
 DB_NAME = 'products.db'
 
 def init_db():
@@ -46,12 +47,11 @@ def check_new_items():
         print("エラー: LINE_CHANNEL_ACCESS_TOKEN または LINE_USER_ID が設定されていません。")
         return
 
-    # LINE v3 APIクライアントの設定
     configuration = Configuration(access_token=CHANNEL_ACCESS_TOKEN)
     
     print("巡回チェックを開始します...")
     try:
-        response = requests.get(TARGET_URL, timeout=10)
+        response = requests.get(BASE_URL, timeout=10)
         response.encoding = response.apparent_encoding
     except Exception as e:
         print(f"サイトへのアクセスに失敗しました: {e}")
@@ -59,69 +59,61 @@ def check_new_items():
 
     soup = BeautifulSoup(response.text, 'html.parser')
     
-    # データベース接続
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     
-    # 初回実行（DBが空）かどうかを判定
     first_run = is_db_empty()
     if first_run:
         print("【初回起動検知】現在の全商品を通知なしでデータベースに初期登録します...")
 
     new_items_found = 0
-
-    # ページ内の全リンクを取得
     links = soup.find_all('a', href=True)
     
     for a in links:
-        href = a['href']
+        href = a['href'].strip()
         title = a.get_text(strip=True)
         
-        # 【判定ロジックの改善】
-        # トップページの余計なナビリンク等を除外し、意味のある更新リンク（文字数4〜100文字）を抽出
-        if title and 4 <= len(title) <= 100:
-            # トップページ自身へのリンクや無関係なメニューを除外
-            if href in ['/', '#', 'javascript:void(0);'] or 'cart' in href or 'myaccount' in href:
-                continue
-                
-            # 相対パスを絶対パス（http...）に変換
-            if href.startswith('/'):
-                full_url = TARGET_URL.rstrip('/') + href
-            elif href.startswith('http'):
-                full_url = href
-            else:
-                continue
-                
-            # DBに未登録のURLか確認
-            cursor.execute('SELECT url FROM products WHERE url = ?', (full_url,))
-            result = cursor.fetchone()
+        # 不要なナビゲーションや短すぎる・長すぎるタイトルを除外
+        if not title or len(title) < 4 or len(title) > 100:
+            continue
             
-            if not result:
-                # 新規登録
-                cursor.execute('INSERT INTO products (url, title) VALUES (?, ?)', (full_url, title))
-                conn.commit()
-                
-                # 初回実行時はLINE送信をスキップ
-                if first_run:
-                    continue
+        if href in ['/', '#', 'javascript:void(0);'] or 'cart' in href or 'myaccount' in href:
+            continue
 
-                # 送信用テキストを作成
-                message_text = f"【新着・在庫更新】\n・{title}\n\n{full_url}"
-                
-                # LINE v3 APIによるPush送信
-                try:
-                    with ApiClient(configuration) as api_client:
-                        line_bot_api = MessagingApi(api_client)
-                        push_message_request = PushMessageRequest(
-                            to=USER_ID,
-                            messages=[TextMessage(text=message_text)]
-                        )
-                        line_bot_api.push_message(push_message_request)
-                        
-                    print(f"通知送信: {title}")
-                    new_items_found += 1
-                except Exception as e:
-                    print(f"LINE API送信エラー: {e}")
+        # urllib.parse.urljoin を使い、どんな相対パスでも完璧な絶対URL (http://...) に変換
+        full_url = urljoin(BASE_URL, href)
+
+        # 【厳格チェック】必ず http:// か https:// で始まる正常なURLのみ対象
+        if not (full_url.startswith('http://') or full_url.startswith('https://')):
+            continue
+
+        # DBに未登録のURLか確認
+        cursor.execute('SELECT url FROM products WHERE url = ?', (full_url,))
+        result = cursor.fetchone()
+        
+        if not result:
+            # DBに新規登録
+            cursor.execute('INSERT INTO products (url, title) VALUES (?, ?)', (full_url, title))
+            conn.commit()
+            
+            if first_run:
+                continue
+
+            message_text = f"【新着・在庫更新】\n・{title}\n\n{full_url}"
+            
+            try:
+                with ApiClient(configuration) as api_client:
+                    line_bot_api = MessagingApi(api_client)
+                    push_message_request = PushMessageRequest(
+                        to=USER_ID,
+                        messages=[TextMessage(text=message_text)]
+                    )
+                    line_bot_api.push_message(push_message_request)
+                    
+                print(f"通知送信: {title}")
+                new_items_found += 1
+            except Exception as e:
+                print(f"LINE API送信エラー: {e}")
 
     conn.close()
     
