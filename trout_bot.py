@@ -34,19 +34,21 @@ def init_db():
     conn.commit()
     conn.close()
 
-def is_seen(key):
+def is_seen(url):
+    """商品URLのみで既読判定"""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute('SELECT 1 FROM seen_items WHERE url = ?', (key,))
+    c.execute('SELECT 1 FROM seen_items WHERE url = ?', (url,))
     row = c.fetchone()
     conn.close()
     return row is not None
 
 def mark_as_seen(items):
+    """(url, title) のペアを記録"""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    for key, title in items:
-        c.execute('INSERT OR IGNORE INTO seen_items (url, title) VALUES (?, ?)', (key, title))
+    for url, title in items:
+        c.execute('INSERT OR IGNORE INTO seen_items (url, title) VALUES (?, ?)', (url, title))
     conn.commit()
     conn.close()
 
@@ -65,18 +67,15 @@ def force_https(url_str):
     return url_str
 
 def fetch_product_image(product_url, headers):
-    """商品ページに直接アクセスしてメイン画像(og:image または 商品画像)のURLを取得"""
     try:
         res = requests.get(product_url, headers=headers, timeout=5)
         res.encoding = res.apparent_encoding
         p_soup = BeautifulSoup(res.text, "html.parser")
         
-        # 1. og:image タグを探す
         og_img = p_soup.find("meta", property="og:image")
         if og_img and og_img.get("content"):
             return force_https(og_img.get("content"))
         
-        # 2. カラーミーショップ標準の商品メイン画像タグを探す
         img_tag = p_soup.find("img", id="product_image") or p_soup.find("img", class_="product_image")
         if img_tag and img_tag.get("src"):
             return force_https(urljoin(product_url, img_tag.get("src")))
@@ -86,12 +85,13 @@ def fetch_product_image(product_url, headers):
     
     return DEFAULT_IMG
 
-def create_flex_message(title, link, img_url):
-    """確実に画像を表示させるためのFlex Messageカード構造を作成"""
+def create_bubble(title, link, img_url):
+    """カルーセル内に並べる個々の商品カード（バブル）を作成"""
     safe_title = title if len(title) <= 60 else title[:57] + "..."
     
     return {
         "type": "bubble",
+        "size": "micro",  # カルーセルで見やすいコンパクトサイズ
         "hero": {
             "type": "image",
             "url": img_url,
@@ -105,7 +105,7 @@ def create_flex_message(title, link, img_url):
             "contents": [
                 {
                     "type": "text",
-                    "text": "【新着・在庫更新】",
+                    "text": "【新着】",
                     "weight": "bold",
                     "color": "#1DB446",
                     "size": "xs"
@@ -114,7 +114,7 @@ def create_flex_message(title, link, img_url):
                     "type": "text",
                     "text": safe_title,
                     "weight": "bold",
-                    "size": "sm",
+                    "size": "xs",
                     "wrap": True,
                     "margin": "xs"
                 }
@@ -123,7 +123,6 @@ def create_flex_message(title, link, img_url):
         "footer": {
             "type": "box",
             "layout": "vertical",
-            "spacing": "sm",
             "contents": [
                 {
                     "type": "button",
@@ -132,7 +131,7 @@ def create_flex_message(title, link, img_url):
                     "height": "sm",
                     "action": {
                         "type": "uri",
-                        "label": "商品ページを開く",
+                        "label": "詳細",
                         "uri": link
                     }
                 }
@@ -141,7 +140,6 @@ def create_flex_message(title, link, img_url):
     }
 
 def extract_updates(soup):
-    """「新入荷・在庫更新情報」のテキスト領域から商品リンクのみを抽出"""
     items = []
     
     target_blocks = []
@@ -190,32 +188,34 @@ def main():
     raw_items = extract_updates(soup)
     
     new_items = []
-    seen_keys = set()
+    seen_urls = set()
+    
     for title, url in raw_items:
-        key = f"{title}_{url}"
-        if key not in seen_keys and not is_seen(key):
-            seen_keys.add(key)
-            new_items.append((title, url, key))
+        if url not in seen_urls and not is_seen(url):
+            seen_urls.add(url)
+            new_items.append((title, url))
 
     if not new_items:
         print("「新入荷＆在庫更新情報」の新しい更新はありませんでした。")
         return
 
-    # 上位3件を対象
-    send_targets = new_items[:3]
-    flex_messages = []
+    # 今回のご指示通り、最新最大7件を対象に設定
+    send_targets = new_items[:7]
+    bubbles = []
 
-    for title, link, _ in send_targets:
-        # 商品ページから直接画像を解析取得
+    for title, link in send_targets:
         img_url = fetch_product_image(link, headers)
-        
-        # カード型（Flex Message）のJSONを作成
-        flex_json = create_flex_message(title, link, img_url)
-        flex_container = FlexContainer.from_dict(flex_json)
-        
-        safe_alt = f"新着: {title}"[:40]
-        flex_msg = FlexMessage(alt_text=safe_alt, contents=flex_container)
-        flex_messages.append(flex_msg)
+        bubble_json = create_bubble(title, link, img_url)
+        bubbles.append(bubble_json)
+
+    # 7件を1つのカルーセル構造に集約
+    carousel_json = {
+        "type": "carousel",
+        "contents": bubbles
+    }
+
+    flex_container = FlexContainer.from_dict(carousel_json)
+    flex_msg = FlexMessage(alt_text=f"新着入荷情報 ({len(send_targets)}件)", contents=flex_container)
 
     configuration = Configuration(access_token=CHANNEL_ACCESS_TOKEN)
 
@@ -224,12 +224,12 @@ def main():
             line_bot_api = MessagingApi(api_client)
             push_message_request = PushMessageRequest(
                 to=USER_ID,
-                messages=flex_messages
+                messages=[flex_msg]  # 1通のメッセージとして送信
             )
             line_bot_api.push_message(push_message_request)
         
-        mark_as_seen([(key, title) for title, _, key in send_targets])
-        print(f"★商品画像を解析・取得し、{len(send_targets)}件を正常送信しました！")
+        mark_as_seen([(url, title) for title, url in send_targets])
+        print(f"★新着{len(send_targets)}件を1通のカルーセルメッセージで送信しました。")
     except Exception as e:
         print(f"★送信エラー: {e}")
 
