@@ -6,15 +6,23 @@ import hashlib
 from urllib.parse import urljoin
 from bs4 import BeautifulSoup
 
+# LINE Messaging API v3
+from linebot.v3.messaging import (
+    Configuration,
+    ApiClient,
+    MessagingApi,
+    PushMessageRequest,
+    FlexMessage,
+    FlexContainer
+)
+
+CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN', '').strip()
+USER_ID = os.environ.get('LINE_USER_ID', '').strip()
 TARGET_URL = "https://troutisland.shop-pro.jp/"
 DB_FILE = "products.db"
+DEFAULT_IMG = "https://raw.githubusercontent.com/line/line-images/master/blogs/20200806/logo.png"
 
-def init_and_reset_db():
-    """既存のDBを一度削除し、クリーンな状態で再構築する"""
-    if os.path.exists(DB_FILE):
-        os.remove(DB_FILE)
-        print("古い DB (products.db) を削除しました。")
-
+def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute('''
@@ -32,6 +40,22 @@ def generate_key(url, title):
     raw_str = f"{url}_{title}"
     return hashlib.md5(raw_str.encode('utf-8')).hexdigest()
 
+def is_seen(item_key):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('SELECT 1 FROM seen_items WHERE item_key = ?', (item_key,))
+    row = c.fetchone()
+    conn.close()
+    return row is not None
+
+def mark_as_seen(items):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    for item_key, url, title in items:
+        c.execute('INSERT OR IGNORE INTO seen_items (item_key, url, title) VALUES (?, ?, ?)', (item_key, url, title))
+    conn.commit()
+    conn.close()
+
 def clean_text(text):
     if not text:
         return ""
@@ -46,8 +70,81 @@ def force_https(url_str):
         return "https://" + url_str[7:]
     return url_str
 
+def fetch_product_image(product_url, headers):
+    try:
+        res = requests.get(product_url, headers=headers, timeout=5)
+        res.encoding = res.apparent_encoding
+        p_soup = BeautifulSoup(res.text, "html.parser")
+        
+        og_img = p_soup.find("meta", property="og:image")
+        if og_img and og_img.get("content"):
+            return force_https(og_img.get("content"))
+        
+        img_tag = p_soup.find("img", id="product_image") or p_soup.find("img", class_="product_image")
+        if img_tag and img_tag.get("src"):
+            return force_https(urljoin(product_url, img_tag.get("src")))
+            
+    except Exception as e:
+        print(f"画像取得スキップ ({product_url}): {e}")
+    
+    return DEFAULT_IMG
+
+def create_bubble(title, link, img_url):
+    safe_title = title if len(title) <= 60 else title[:57] + "..."
+    
+    return {
+        "type": "bubble",
+        "size": "micro",
+        "hero": {
+            "type": "image",
+            "url": img_url,
+            "size": "full",
+            "aspectRatio": "4:3",
+            "aspectMode": "cover"
+        },
+        "body": {
+            "type": "box",
+            "layout": "vertical",
+            "contents": [
+                {
+                    "type": "text",
+                    "text": "【新着・更新】",
+                    "weight": "bold",
+                    "color": "#1DB446",
+                    "size": "xs"
+                },
+                {
+                    "type": "text",
+                    "text": safe_title,
+                    "weight": "bold",
+                    "size": "xs",
+                    "wrap": True,
+                    "margin": "xs"
+                }
+            ]
+        },
+        "footer": {
+            "type": "box",
+            "layout": "vertical",
+            "contents": [
+                {
+                    "type": "button",
+                    "style": "primary",
+                    "color": "#1DB446",
+                    "height": "sm",
+                    "action": {
+                        "type": "uri",
+                        "label": "詳細",
+                        "uri": link
+                    }
+                }
+            ]
+        }
+    }
+
 def extract_updates(soup):
     items = []
+    
     target_blocks = []
     for tag in soup.find_all(['td', 'div', 'p', 'table']):
         text = tag.get_text()
@@ -76,10 +173,11 @@ def extract_updates(soup):
     return items
 
 def main():
-    print("--- データベースの一括初期化処理を開始します ---")
-    
-    # DBをクリーン作成
-    init_and_reset_db()
+    if not CHANNEL_ACCESS_TOKEN or not USER_ID:
+        print("エラー: Secrets (LINE_CHANNEL_ACCESS_TOKEN または LINE_USER_ID) が設定されていません。")
+        return
+
+    init_db()
 
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     try:
@@ -92,20 +190,51 @@ def main():
 
     raw_items = extract_updates(soup)
     
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
+    # 新着アイテムのみを検出
+    new_items = []
+    seen_keys = set()
     
-    registered_count = 0
     for title, url in raw_items:
         item_key = generate_key(url, title)
-        c.execute('INSERT OR IGNORE INTO seen_items (item_key, url, title) VALUES (?, ?, ?)', (item_key, url, title))
-        registered_count += 1
-        
-    conn.commit()
-    conn.close()
+        if item_key not in seen_keys and not is_seen(item_key):
+            seen_keys.add(item_key)
+            new_items.append((item_key, title, url))
 
-    print(f"【成功】現在サイトにある全 {registered_count} 件の商品を既読データとして DB に一括登録しました。")
-    print("※LINEへの通知処理は実行していません。")
+    if not new_items:
+        print("「新入荷＆在庫更新情報」の新しい更新はありませんでした。")
+        return
+
+    send_targets = new_items[:7]
+    bubbles = []
+
+    for item_key, title, link in send_targets:
+        img_url = fetch_product_image(link, headers)
+        bubble_json = create_bubble(title, link, img_url)
+        bubbles.append(bubble_json)
+
+    carousel_json = {
+        "type": "carousel",
+        "contents": bubbles
+    }
+
+    flex_container = FlexContainer.from_dict(carousel_json)
+    flex_msg = FlexMessage(alt_text=f"新着・在庫更新情報 ({len(send_targets)}件)", contents=flex_container)
+
+    configuration = Configuration(access_token=CHANNEL_ACCESS_TOKEN)
+
+    try:
+        with ApiClient(configuration) as api_client:
+            line_bot_api = MessagingApi(api_client)
+            push_message_request = PushMessageRequest(
+                to=USER_ID,
+                messages=[flex_msg]
+            )
+            line_bot_api.push_message(push_message_request)
+        
+        mark_as_seen([(item_key, url, title) for item_key, title, url in send_targets])
+        print(f"★管理個人のみへ新着・在庫更新 {len(send_targets)}件のカルーセル通知を送信しました。")
+    except Exception as e:
+        print(f"★送信エラー: {e}")
 
 if __name__ == "__main__":
     main()
