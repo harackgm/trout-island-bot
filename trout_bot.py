@@ -3,7 +3,7 @@ import sqlite3
 import requests
 import re
 import hashlib
-from urllib.parse import urljoin, quote
+from urllib.parse import urljoin
 from bs4 import BeautifulSoup
 
 # LINE Messaging API v3
@@ -12,16 +12,12 @@ from linebot.v3.messaging import (
     ApiClient,
     MessagingApi,
     BroadcastRequest,
-    TextMessage,
-    ImageMessage
+    TextMessage
 )
 
 CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN', '').strip()
 TARGET_URL = "https://troutisland.shop-pro.jp/"
 DB_FILE = "products.db"
-
-# デフォルト画像（取得失敗時）
-DEFAULT_IMG = "https://raw.githubusercontent.com/line/line-images/master/blogs/20200806/logo.png"
 
 def init_db():
     conn = sqlite3.connect(DB_FILE)
@@ -67,37 +63,6 @@ def clean_text(text):
     text = re.sub(r'[\r\n\t]+', ' ', text)
     text = re.sub(r'\s+', ' ', text)
     return text.strip()
-
-def fetch_product_image(product_url, headers):
-    """個別商品ページから画像URLを抽出"""
-    try:
-        res = requests.get(product_url, headers=headers, timeout=5)
-        res.encoding = res.apparent_encoding
-        p_soup = BeautifulSoup(res.text, "html.parser")
-        
-        img_src = None
-        og_img = p_soup.find("meta", property="og:image")
-        if og_img and og_img.get("content"):
-            img_src = og_img.get("content")
-        else:
-            img_tag = p_soup.find("img", id="product_image") or p_soup.find("img", class_="product_image")
-            if img_tag and img_tag.get("src"):
-                img_src = img_tag.get("src")
-        
-        if img_src:
-            if img_src.startswith("//"):
-                img_src = "https:" + img_src
-            elif img_src.startswith("http://"):
-                img_src = img_src.replace("http://", "https://", 1)
-            elif not img_src.startswith("http"):
-                img_src = urljoin(product_url, img_src)
-            
-            return f"https://images.weserv.nl/?url={quote(img_src)}&output=jpg"
-            
-    except Exception as e:
-        print(f"画像取得スキップ ({product_url}): {e}")
-    
-    return DEFAULT_IMG
 
 def extract_updates(soup):
     items = []
@@ -170,36 +135,25 @@ def main():
         print("「新入荷＆在庫更新情報」の新しい更新はありませんでした。")
         return
 
-    # 一度に送信する件数を上限5件（LINE APIの1回あたりの送信メッセージ枠上限）に制限
+    # 一度に送信する件数を5件までに制限
     send_targets = new_items[:5]
     messages = []
 
-    # 全体ヘッダーメッセージ
+    # 全体ヘッダー
     messages.append(TextMessage(text=f"【新着・在庫更新情報】({len(send_targets)}件)"))
 
+    # 各商品のテキスト＋URL（URLから自動で画像プレビューが生成されます）
     for item_key, title, link in send_targets:
-        img_url = fetch_product_image(link, headers)
-        
-        # 画像メッセージを追加（PC版でも確実に描画される標準仕様）
-        messages.append(ImageMessage(original_content_url=img_url, preview_image_url=img_url))
-        
-        # テキスト＋リンクメッセージ
         msg_text = f"■ {title}\n{link}"
         messages.append(TextMessage(text=msg_text))
 
-    # LINE APIは1回の送信で最大5メッセージまでのため、分けてブロードキャスト
     configuration = Configuration(access_token=CHANNEL_ACCESS_TOKEN)
 
     try:
         with ApiClient(configuration) as api_client:
             line_bot_api = MessagingApi(api_client)
-            
-            # 5メッセージずつに分割して送信
-            chunk_size = 5
-            for i in range(0, len(messages), chunk_size):
-                chunk = messages[i:i + chunk_size]
-                broadcast_request = BroadcastRequest(messages=chunk)
-                line_bot_api.broadcast(broadcast_request)
+            broadcast_request = BroadcastRequest(messages=messages)
+            line_bot_api.broadcast(broadcast_request)
         
         mark_as_seen([(item_key, url, title) for item_key, title, url in send_targets])
         print(f"★全登録者へ新着・在庫更新 {len(send_targets)}件を送信しました。")
