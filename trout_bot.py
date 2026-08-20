@@ -71,8 +71,8 @@ def clean_text(text):
     text = re.sub(r'\s+', ' ', text)
     return text.strip()
 
-def download_and_get_raw_url(item_key, product_url, headers):
-    """画像をローカルにダウンロードし、GitHub RAW URLを生成"""
+def download_and_get_pages_url(item_key, product_url, headers):
+    """画像をローカルにダウンロードし、GitHub Pagesの直リンクURLを生成"""
     try:
         res = requests.get(product_url, headers=headers, timeout=5)
         res.encoding = res.apparent_encoding
@@ -103,9 +103,10 @@ def download_and_get_raw_url(item_key, product_url, headers):
                 with open(file_path, "wb") as f:
                     f.write(img_res.content)
                 
-                # GitHub RAW URL
-                if GITHUB_REPOSITORY:
-                    return f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/{IMG_DIR}/{item_key}.jpg"
+                # GitHub Pages URL (リダイレクトなし直リンク)
+                if GITHUB_REPOSITORY and "/" in GITHUB_REPOSITORY:
+                    user, repo = GITHUB_REPOSITORY.split("/")
+                    return f"https://{user}.github.io/{repo}/{IMG_DIR}/{item_key}.jpg"
             
     except Exception as e:
         print(f"画像ダウンロード失敗 ({product_url}): {e}")
@@ -251,16 +252,14 @@ def main():
     send_targets = new_items[:7]
     bubbles = []
 
-    # 画像取得・保存処理
     has_downloaded = False
     for item_key, title, link in send_targets:
-        img_url = download_and_get_raw_url(item_key, link, headers)
+        img_url = download_and_get_pages_url(item_key, link, headers)
         if img_url != DEFAULT_IMG:
             has_downloaded = True
         bubble_json = create_bubble(title, link, img_url)
         bubbles.append(bubble_json)
 
-    # 画像があればGitHubへコミット
     if has_downloaded:
         commit_images()
 
