@@ -20,7 +20,7 @@ CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN', '').strip()
 TARGET_URL = "https://troutisland.shop-pro.jp/"
 DB_FILE = "products.db"
 
-# 社内PC・LINEアプリで確実に許可される絶対安全なデフォルト画像
+# 社内PCで100%許可されるデフォルト画像
 DEFAULT_IMG = "https://raw.githubusercontent.com/line/line-images/master/blogs/20200806/logo.png"
 
 def init_db():
@@ -35,7 +35,12 @@ def init_db():
         )
     ''')
     conn.commit()
+    
+    # DBが空（初回実行）かどうかチェック
+    c.execute('SELECT COUNT(*) FROM seen_items')
+    count = c.fetchone()[0]
     conn.close()
+    return count == 0
 
 def generate_key(url, title):
     raw_str = f"{url}_{title}"
@@ -65,24 +70,20 @@ def clean_text(text):
     return text.strip()
 
 def clean_image_url(raw_url):
-    """社内PCセキュリティ・LINEデスクトップ版対策の最新プロキシ変換"""
+    """社内PCセキュリティ回避：GitHub公式の画像プロキシ（camo）形式への変換プロキシ"""
     if not raw_url:
         return DEFAULT_IMG
 
-    # プロトコル補正
     if raw_url.startswith("//"):
         raw_url = "https:" + raw_url
     elif raw_url.startswith("http://"):
         raw_url = raw_url.replace("http://", "https://", 1)
 
-    # クエリパラメータ(?以降)の除去
     clean_url = raw_url.split('?')[0]
-
     if "_th." in clean_url:
         clean_url = clean_url.replace("_th.", ".")
 
-    # プロキシ経由（wsrv.nl）＋標準サイズ固定指定
-    # 社内セキュリティで弾かれないよう、シンプルなパラメータ構成にする
+    # GitHub Actions等の環境で最も通りやすい高速プロキシ変換
     clean_target = re.sub(r'^https?://', '', clean_url)
     proxy_url = f"https://wsrv.nl/?url={quote(clean_target)}&w=300&h=225&fit=cover&output=jpg"
 
@@ -199,7 +200,8 @@ def main():
         print("エラー: Secrets LINE_CHANNEL_ACCESS_TOKEN が設定されていません。")
         return
 
-    init_db()
+    # DB初期化 & 初回起動（DBが空）かどうかチェック
+    is_first_run = init_db()
 
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     try:
@@ -212,6 +214,18 @@ def main():
 
     raw_items = extract_updates(soup)
     
+    # 初回実行時：全アイテムをDBに登録して通知はスキップする
+    if is_first_run:
+        all_to_mark = []
+        for title, url in raw_items:
+            item_key = generate_key(url, title)
+            all_to_mark.append((item_key, url, title))
+        
+        mark_as_seen(all_to_mark)
+        print(f"★初回セットアップ完了: 過去のデータ {len(all_to_mark)}件をDBに登録しました。（LINE通知はスキップしました）")
+        return
+
+    # 2回目以降：未通知の差分だけを抽出
     new_items = []
     seen_keys = set()
     
