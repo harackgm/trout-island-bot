@@ -135,14 +135,14 @@ def main():
         print("「新入荷＆在庫更新情報」の新しい更新はありませんでした。")
         return
 
-    # 一度に送信する件数を5件までに制限
+    # 1度の更新通知で送る商品を最大5件に設定
     send_targets = new_items[:5]
     messages = []
 
     # 全体ヘッダー
     messages.append(TextMessage(text=f"【新着・在庫更新情報】({len(send_targets)}件)"))
 
-    # 各商品のテキスト＋URL（URLから自動で画像プレビューが生成されます）
+    # 各商品のテキスト＋URL
     for item_key, title, link in send_targets:
         msg_text = f"■ {title}\n{link}"
         messages.append(TextMessage(text=msg_text))
@@ -152,11 +152,16 @@ def main():
     try:
         with ApiClient(configuration) as api_client:
             line_bot_api = MessagingApi(api_client)
-            broadcast_request = BroadcastRequest(messages=messages)
-            line_bot_api.broadcast(broadcast_request)
+            
+            # LINE APIの上限（1リクエスト最大5件）に合わせて分割して送信
+            chunk_size = 5
+            for i in range(0, len(messages), chunk_size):
+                chunk = messages[i:i + chunk_size]
+                broadcast_request = BroadcastRequest(messages=chunk)
+                line_bot_api.broadcast(broadcast_request)
         
         mark_as_seen([(item_key, url, title) for item_key, title, url in send_targets])
-        print(f"★全登録者へ新着・在庫更新 {len(send_targets)}件を送信しました。")
+        print(f"★全登録者へ新着・在庫更新 {len(send_targets)}件を正常送信しました。")
     except Exception as e:
         print(f"★送信エラー: {e}")
 
