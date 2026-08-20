@@ -75,13 +75,18 @@ def fetch_product_image(product_url, headers):
         res.encoding = res.apparent_encoding
         p_soup = BeautifulSoup(res.text, "html.parser")
         
+        img_src = None
         og_img = p_soup.find("meta", property="og:image")
         if og_img and og_img.get("content"):
-            return force_https(og_img.get("content"))
+            img_src = og_img.get("content")
+        else:
+            img_tag = p_soup.find("img", id="product_image") or p_soup.find("img", class_="product_image")
+            if img_tag and img_tag.get("src"):
+                img_src = urljoin(product_url, img_tag.get("src"))
         
-        img_tag = p_soup.find("img", id="product_image") or p_soup.find("img", class_="product_image")
-        if img_tag and img_tag.get("src"):
-            return force_https(urljoin(product_url, img_tag.get("src")))
+        if img_src:
+            # http:// で始まる画像URLを確実に https:// へ変換（会社PCのセキュリティブロック対策）
+            return force_https(img_src)
             
     except Exception as e:
         print(f"画像取得スキップ ({product_url}): {e}")
@@ -224,7 +229,7 @@ def main():
     try:
         with ApiClient(configuration) as api_client:
             line_bot_api = MessagingApi(api_client)
-            # 登録者全員へ一斉送信
+            # 登録者全員へ一斉送信（一括通知）
             broadcast_request = BroadcastRequest(messages=[flex_msg])
             line_bot_api.broadcast(broadcast_request)
         
