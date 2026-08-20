@@ -3,7 +3,7 @@ import sqlite3
 import requests
 import re
 import hashlib
-from urllib.parse import urljoin, quote, urlparse, urlunparse
+from urllib.parse import urljoin, quote
 from bs4 import BeautifulSoup
 
 # LINE Messaging API v3
@@ -63,7 +63,7 @@ def clean_text(text):
     return text.strip()
 
 def clean_image_url(raw_url):
-    """PC版LINEおよび社内プロキシ対策：URLの最適化・HTTPS化・クエリ除去"""
+    """会社PCの社内プロキシ・ブロック回避：WSERV画像プロキシを経由させる処理"""
     if not raw_url:
         return DEFAULT_IMG
 
@@ -73,22 +73,18 @@ def clean_image_url(raw_url):
     elif raw_url.startswith("http://"):
         raw_url = raw_url.replace("http://", "https://", 1)
 
-    # クエリパラメータ(?以降)を完全に除去して純粋な画像URLにする
+    # クエリパラメータ(?以降)の除去
     clean_url = raw_url.split('?')[0]
 
-    # サムネイル表示用フラグやWebP形式の特殊変換があれば汎用JPGへ（必要に応じて）
     if "_th." in clean_url:
         clean_url = clean_url.replace("_th.", ".")
 
-    # URLの日本語・特殊文字エスケープ対策
-    try:
-        parsed = urlparse(clean_url)
-        encoded_path = quote(parsed.path)
-        clean_url = urlunparse((parsed.scheme, parsed.netloc, encoded_path, parsed.params, parsed.query, parsed.fragment))
-    except Exception:
-        pass
+    # 会社PCのアクセスブロック回避のため、画像プロキシ(wserv.nl)を経由させる
+    # http:// または https:// を除いたURL部分をエンコードして付与
+    clean_target = re.sub(r'^https?://', '', clean_url)
+    proxy_url = f"https://images.weserv.nl/?url={quote(clean_target)}&output=jpg"
 
-    return clean_url
+    return proxy_url
 
 def fetch_product_image(product_url, headers):
     try:
@@ -106,7 +102,6 @@ def fetch_product_image(product_url, headers):
                 img_src = urljoin(product_url, img_tag.get("src"))
         
         if img_src:
-            # 取得したURLをPC版LINE向けにクリーニング処理
             return clean_image_url(img_src)
             
     except Exception as e:
