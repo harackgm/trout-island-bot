@@ -3,7 +3,7 @@ import sqlite3
 import requests
 import re
 import hashlib
-from urllib.parse import urljoin
+from urllib.parse import urljoin, quote, urlparse, urlunparse
 from bs4 import BeautifulSoup
 
 # LINE Messaging API v3
@@ -62,12 +62,33 @@ def clean_text(text):
     text = re.sub(r'\s+', ' ', text)
     return text.strip()
 
-def force_https(url_str):
-    if not url_str:
-        return ""
-    if url_str.startswith("http://"):
-        return "https://" + url_str[7:]
-    return url_str
+def clean_image_url(raw_url):
+    """PC版LINEおよび社内プロキシ対策：URLの最適化・HTTPS化・クエリ除去"""
+    if not raw_url:
+        return DEFAULT_IMG
+
+    # プロトコル補正
+    if raw_url.startswith("//"):
+        raw_url = "https:" + raw_url
+    elif raw_url.startswith("http://"):
+        raw_url = raw_url.replace("http://", "https://", 1)
+
+    # クエリパラメータ(?以降)を完全に除去して純粋な画像URLにする
+    clean_url = raw_url.split('?')[0]
+
+    # サムネイル表示用フラグやWebP形式の特殊変換があれば汎用JPGへ（必要に応じて）
+    if "_th." in clean_url:
+        clean_url = clean_url.replace("_th.", ".")
+
+    # URLの日本語・特殊文字エスケープ対策
+    try:
+        parsed = urlparse(clean_url)
+        encoded_path = quote(parsed.path)
+        clean_url = urlunparse((parsed.scheme, parsed.netloc, encoded_path, parsed.params, parsed.query, parsed.fragment))
+    except Exception:
+        pass
+
+    return clean_url
 
 def fetch_product_image(product_url, headers):
     try:
@@ -85,8 +106,8 @@ def fetch_product_image(product_url, headers):
                 img_src = urljoin(product_url, img_tag.get("src"))
         
         if img_src:
-            # http:// で始まる画像URLを確実に https:// へ変換（会社PCのセキュリティブロック対策）
-            return force_https(img_src)
+            # 取得したURLをPC版LINE向けにクリーニング処理
+            return clean_image_url(img_src)
             
     except Exception as e:
         print(f"画像取得スキップ ({product_url}): {e}")
@@ -171,7 +192,7 @@ def extract_updates(soup):
             has_date = bool(re.search(r'\d{1,2}/\d{1,2}', text) or re.search(r'\d{1,2}/\d{1,2}', parent_text))
 
             if has_date and ('pid=' in href or 'shop-pro.jp' in href):
-                full_url = force_https(urljoin(TARGET_URL, href))
+                full_url = urljoin(TARGET_URL, href)
                 items.append((text, full_url))
 
     return items
@@ -194,7 +215,6 @@ def main():
 
     raw_items = extract_updates(soup)
     
-    # 新着アイテムのみを検出
     new_items = []
     seen_keys = set()
     
@@ -229,7 +249,6 @@ def main():
     try:
         with ApiClient(configuration) as api_client:
             line_bot_api = MessagingApi(api_client)
-            # 登録者全員へ一斉送信（一括通知）
             broadcast_request = BroadcastRequest(messages=[flex_msg])
             line_bot_api.broadcast(broadcast_request)
         
