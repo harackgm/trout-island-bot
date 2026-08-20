@@ -3,17 +3,17 @@ name: Trout Island Watcher
 on:
   workflow_dispatch:
   repository_dispatch:
-    types: [cron_trigger]
 
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v3
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/python-version@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
@@ -22,16 +22,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests beautifulsoup4 line-bot-sdk
 
-      - name: Run Trout Island Watcher Script
+      - name: Run Trout Island Bot
         env:
           LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
-          IMGUR_CLIENT_ID: ${{ secrets.IMGUR_CLIENT_ID }}
         run: python trout_bot.py
-
-      - name: Commit and push DB changes
-        run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add products.db
-          git commit -m "Update products.db with new sent items" || exit 0
-          git push
