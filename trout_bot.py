@@ -19,6 +19,9 @@ CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN', '').strip()
 TARGET_URL = "https://troutisland.shop-pro.jp/"
 DB_FILE = "products.db"
 
+# ★強制的につじつまを合わせて通知をスキップするフラグ（最初はTrue）
+FORCE_CLEAR_DB = True
+
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -50,7 +53,6 @@ def is_seen(item_key):
     return row is not None
 
 def mark_as_seen(items):
-    """取得した全アイテムをDBに登録して既読化"""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     for item_key, url, title in items:
@@ -100,7 +102,7 @@ def main():
         print("エラー: Secrets LINE_CHANNEL_ACCESS_TOKEN が設定されていません。")
         return
 
-    is_first_run = init_db()
+    init_db()
 
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     try:
@@ -113,42 +115,40 @@ def main():
 
     raw_items = extract_updates(soup)
     
-    if is_first_run:
-        all_to_mark = []
-        for title, url in raw_items:
-            item_key = generate_key(url, title)
-            all_to_mark.append((item_key, url, title))
-        
-        mark_as_seen(all_to_mark)
-        print(f"★初回セットアップ完了: 過去のデータ {len(all_to_mark)}件をDBに登録しました。")
+    # 全アイテムのキーを作成
+    all_current_items = []
+    for title, url in raw_items:
+        item_key = generate_key(url, title)
+        all_current_items.append((item_key, url, title))
+
+    # 強制DB登録フラグがTrueの場合、全て登録して通知せずに終了
+    if FORCE_CLEAR_DB:
+        mark_as_seen(all_current_items)
+        print(f"★DB同期完了: 現在のサイトデータ {len(all_current_items)}件をすべて既読としてDB登録しました。（通知はスキップされました）")
         return
 
+    # 通常時の処理（新規差分のみ通知）
     new_items = []
     seen_keys = set()
-    all_new_to_mark = []
     
     for title, url in raw_items:
         item_key = generate_key(url, title)
         if item_key not in seen_keys and not is_seen(item_key):
             seen_keys.add(item_key)
             new_items.append((item_key, title, url))
-            all_new_to_mark.append((item_key, url, title))
 
     if not new_items:
         print("「新入荷＆在庫更新情報」の新しい更新はありませんでした。")
         return
 
-    # 今回新しく検知された全アイテムを即座にDB登録（次回以降に繰り越さない）
-    mark_as_seen(all_new_to_mark)
+    # 送信前に今回検知したものを全件DB登録
+    mark_as_seen(all_current_items)
 
-    # 送信は最大5件まで
     send_targets = new_items[:5]
     messages = []
 
-    # 全体ヘッダー
     messages.append(TextMessage(text=f"【新着・在庫更新情報】({len(send_targets)}件)"))
 
-    # 各商品のテキスト＋URL
     for item_key, title, link in send_targets:
         msg_text = f"■ {title}\n{link}"
         messages.append(TextMessage(text=msg_text))
