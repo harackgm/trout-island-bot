@@ -19,10 +19,8 @@ CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN', '').strip()
 TARGET_URL = "https://troutisland.shop-pro.jp/"
 DB_FILE = "products.db"
 
-# ★強制的につじつまを合わせて通知をスキップするフラグ（最初はTrue）
-FORCE_CLEAR_DB = True
-
 def init_db():
+    """DBを初期化し、テーブルが空（初回起動）かどうかを判定する"""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute('''
@@ -53,6 +51,7 @@ def is_seen(item_key):
     return row is not None
 
 def mark_as_seen(items):
+    """取得したアイテムをDBに登録して既読化"""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     for item_key, url, title in items:
@@ -102,7 +101,8 @@ def main():
         print("エラー: Secrets LINE_CHANNEL_ACCESS_TOKEN が設定されていません。")
         return
 
-    init_db()
+    # 初回起動（DBにデータが一切ない状態）かどうか判定
+    is_first_run = init_db()
 
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     try:
@@ -115,19 +115,19 @@ def main():
 
     raw_items = extract_updates(soup)
     
-    # 全アイテムのキーを作成
+    # サイト上の全アイテム情報を整理
     all_current_items = []
     for title, url in raw_items:
         item_key = generate_key(url, title)
         all_current_items.append((item_key, url, title))
 
-    # 強制DB登録フラグがTrueの場合、全て登録して通知せずに終了
-    if FORCE_CLEAR_DB:
+    # 【目的1】初回起動時は通知せず、すべてDB登録（初回セットアップ）して終了
+    if is_first_run:
         mark_as_seen(all_current_items)
-        print(f"★DB同期完了: 現在のサイトデータ {len(all_current_items)}件をすべて既読としてDB登録しました。（通知はスキップされました）")
+        print(f"★初回セットアップ完了: 過去データ {len(all_current_items)}件をすべてDB登録しました（通知は送信されません）。")
         return
 
-    # 通常時の処理（新規差分のみ通知）
+    # 【目的2】2回目以降の通常実行：未登録の新着差分のみをチェック
     new_items = []
     seen_keys = set()
     
@@ -141,9 +141,10 @@ def main():
         print("「新入荷＆在庫更新情報」の新しい更新はありませんでした。")
         return
 
-    # 送信前に今回検知したものを全件DB登録
+    # 送信前に今回検知されたデータを全件DB登録（次回への繰り越しを防止）
     mark_as_seen(all_current_items)
 
+    # 1回の送信上限（最大5件）
     send_targets = new_items[:5]
     messages = []
 
@@ -165,7 +166,7 @@ def main():
                 broadcast_request = BroadcastRequest(messages=chunk)
                 line_bot_api.broadcast(broadcast_request)
         
-        print(f"★全登録者へ新着・在庫更新 {len(send_targets)}件を送信しました。")
+        print(f"★全登録者へ新着・在庫更新 {len(send_targets)}件を正常送信しました。")
     except Exception as e:
         print(f"★送信エラー: {e}")
 
