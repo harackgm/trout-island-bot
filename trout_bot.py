@@ -3,7 +3,8 @@ import sqlite3
 import requests
 import re
 import hashlib
-from urllib.parse import urljoin, quote
+import subprocess
+from urllib.parse import urljoin
 from bs4 import BeautifulSoup
 
 # LINE Messaging API v3
@@ -17,8 +18,10 @@ from linebot.v3.messaging import (
 )
 
 CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN', '').strip()
+GITHUB_REPOSITORY = os.environ.get('GITHUB_REPOSITORY', '')  # username/repo
 TARGET_URL = "https://troutisland.shop-pro.jp/"
 DB_FILE = "products.db"
+IMG_DIR = "images"
 
 # デフォルト画像
 DEFAULT_IMG = "https://raw.githubusercontent.com/line/line-images/master/blogs/20200806/logo.png"
@@ -68,8 +71,8 @@ def clean_text(text):
     text = re.sub(r'\s+', ' ', text)
     return text.strip()
 
-def fetch_product_image(product_url, headers):
-    """商品画像を取得し、PC版LINEでもブロックされないプロキシURLを生成"""
+def download_and_get_raw_url(item_key, product_url, headers):
+    """画像をローカルにダウンロードし、GitHub RAW URLを生成"""
     try:
         res = requests.get(product_url, headers=headers, timeout=5)
         res.encoding = res.apparent_encoding
@@ -92,13 +95,34 @@ def fetch_product_image(product_url, headers):
             elif not img_src.startswith("http"):
                 img_src = urljoin(product_url, img_src)
             
-            # images.weserv.nl プロキシを経由して直接画像を出力（PC版LINEのブロック回避）
-            return f"https://images.weserv.nl/?url={quote(img_src)}&default={quote(DEFAULT_IMG)}"
+            # 画像ダウンロード
+            img_res = requests.get(img_src, headers=headers, timeout=10)
+            if img_res.status_code == 200:
+                os.makedirs(IMG_DIR, exist_ok=True)
+                file_path = os.path.join(IMG_DIR, f"{item_key}.jpg")
+                with open(file_path, "wb") as f:
+                    f.write(img_res.content)
+                
+                # GitHub RAW URL
+                if GITHUB_REPOSITORY:
+                    return f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/{IMG_DIR}/{item_key}.jpg"
             
     except Exception as e:
-        print(f"画像取得スキップ ({product_url}): {e}")
+        print(f"画像ダウンロード失敗 ({product_url}): {e}")
     
     return DEFAULT_IMG
+
+def commit_images():
+    """ダウンロードした画像をGitHubにコミット＆プッシュ"""
+    try:
+        subprocess.run(["git", "config", "--global", "user.name", "github-actions[bot]"], check=True)
+        subprocess.run(["git", "config", "--global", "user.email", "github-actions[bot]@users.noreply.github.com"], check=True)
+        subprocess.run(["git", "add", IMG_DIR], check=True)
+        subprocess.run(["git", "commit", "-m", "Add downloaded product images"], check=True)
+        subprocess.run(["git", "push"], check=True)
+        print("★画像をGitHubにコミット・プッシュしました。")
+    except Exception as e:
+        print(f"Git commit error: {e}")
 
 def create_bubble(title, link, img_url):
     safe_title = title if len(title) <= 60 else title[:57] + "..."
@@ -227,10 +251,18 @@ def main():
     send_targets = new_items[:7]
     bubbles = []
 
+    # 画像取得・保存処理
+    has_downloaded = False
     for item_key, title, link in send_targets:
-        img_url = fetch_product_image(link, headers)
+        img_url = download_and_get_raw_url(item_key, link, headers)
+        if img_url != DEFAULT_IMG:
+            has_downloaded = True
         bubble_json = create_bubble(title, link, img_url)
         bubbles.append(bubble_json)
+
+    # 画像があればGitHubへコミット
+    if has_downloaded:
+        commit_images()
 
     carousel_json = {
         "type": "carousel",
