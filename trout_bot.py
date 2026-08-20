@@ -50,6 +50,7 @@ def is_seen(item_key):
     return row is not None
 
 def mark_as_seen(items):
+    """取得した全アイテムをDBに登録して既読化"""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     for item_key, url, title in items:
@@ -124,18 +125,23 @@ def main():
 
     new_items = []
     seen_keys = set()
+    all_new_to_mark = []
     
     for title, url in raw_items:
         item_key = generate_key(url, title)
         if item_key not in seen_keys and not is_seen(item_key):
             seen_keys.add(item_key)
             new_items.append((item_key, title, url))
+            all_new_to_mark.append((item_key, url, title))
 
     if not new_items:
         print("「新入荷＆在庫更新情報」の新しい更新はありませんでした。")
         return
 
-    # 1度の更新通知で送る商品を最大5件に設定
+    # 今回新しく検知された全アイテムを即座にDB登録（次回以降に繰り越さない）
+    mark_as_seen(all_new_to_mark)
+
+    # 送信は最大5件まで
     send_targets = new_items[:5]
     messages = []
 
@@ -153,15 +159,13 @@ def main():
         with ApiClient(configuration) as api_client:
             line_bot_api = MessagingApi(api_client)
             
-            # LINE APIの上限（1リクエスト最大5件）に合わせて分割して送信
             chunk_size = 5
             for i in range(0, len(messages), chunk_size):
                 chunk = messages[i:i + chunk_size]
                 broadcast_request = BroadcastRequest(messages=chunk)
                 line_bot_api.broadcast(broadcast_request)
         
-        mark_as_seen([(item_key, url, title) for item_key, title, url in send_targets])
-        print(f"★全登録者へ新着・在庫更新 {len(send_targets)}件を正常送信しました。")
+        print(f"★全登録者へ新着・在庫更新 {len(send_targets)}件を送信しました。")
     except Exception as e:
         print(f"★送信エラー: {e}")
 
