@@ -3,8 +3,7 @@ import sqlite3
 import requests
 import re
 import hashlib
-import subprocess
-from urllib.parse import urljoin
+from urllib.parse import urljoin, quote
 from bs4 import BeautifulSoup
 
 # LINE Messaging API v3
@@ -13,17 +12,15 @@ from linebot.v3.messaging import (
     ApiClient,
     MessagingApi,
     BroadcastRequest,
-    FlexMessage,
-    FlexContainer
+    TextMessage,
+    ImageMessage
 )
 
 CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN', '').strip()
-GITHUB_REPOSITORY = os.environ.get('GITHUB_REPOSITORY', '')  # username/repo
 TARGET_URL = "https://troutisland.shop-pro.jp/"
 DB_FILE = "products.db"
-IMG_DIR = "images"
 
-# デフォルト画像
+# デフォルト画像（取得失敗時）
 DEFAULT_IMG = "https://raw.githubusercontent.com/line/line-images/master/blogs/20200806/logo.png"
 
 def init_db():
@@ -71,8 +68,8 @@ def clean_text(text):
     text = re.sub(r'\s+', ' ', text)
     return text.strip()
 
-def download_and_get_pages_url(item_key, product_url, headers):
-    """画像をローカルにダウンロードし、GitHub Pagesの直リンクURLを生成"""
+def fetch_product_image(product_url, headers):
+    """個別商品ページから画像URLを抽出"""
     try:
         res = requests.get(product_url, headers=headers, timeout=5)
         res.encoding = res.apparent_encoding
@@ -95,88 +92,12 @@ def download_and_get_pages_url(item_key, product_url, headers):
             elif not img_src.startswith("http"):
                 img_src = urljoin(product_url, img_src)
             
-            # 画像ダウンロード
-            img_res = requests.get(img_src, headers=headers, timeout=10)
-            if img_res.status_code == 200:
-                os.makedirs(IMG_DIR, exist_ok=True)
-                file_path = os.path.join(IMG_DIR, f"{item_key}.jpg")
-                with open(file_path, "wb") as f:
-                    f.write(img_res.content)
-                
-                # GitHub Pages URL (リダイレクトなし直リンク)
-                if GITHUB_REPOSITORY and "/" in GITHUB_REPOSITORY:
-                    user, repo = GITHUB_REPOSITORY.split("/")
-                    return f"https://{user}.github.io/{repo}/{IMG_DIR}/{item_key}.jpg"
+            return f"https://images.weserv.nl/?url={quote(img_src)}&output=jpg"
             
     except Exception as e:
-        print(f"画像ダウンロード失敗 ({product_url}): {e}")
+        print(f"画像取得スキップ ({product_url}): {e}")
     
     return DEFAULT_IMG
-
-def commit_images():
-    """ダウンロードした画像をGitHubにコミット＆プッシュ"""
-    try:
-        subprocess.run(["git", "config", "--global", "user.name", "github-actions[bot]"], check=True)
-        subprocess.run(["git", "config", "--global", "user.email", "github-actions[bot]@users.noreply.github.com"], check=True)
-        subprocess.run(["git", "add", IMG_DIR], check=True)
-        subprocess.run(["git", "commit", "-m", "Add downloaded product images"], check=True)
-        subprocess.run(["git", "push"], check=True)
-        print("★画像をGitHubにコミット・プッシュしました。")
-    except Exception as e:
-        print(f"Git commit error: {e}")
-
-def create_bubble(title, link, img_url):
-    safe_title = title if len(title) <= 60 else title[:57] + "..."
-    
-    return {
-        "type": "bubble",
-        "size": "micro",
-        "hero": {
-            "type": "image",
-            "url": img_url,
-            "size": "full",
-            "aspectRatio": "4:3",
-            "aspectMode": "cover"
-        },
-        "body": {
-            "type": "box",
-            "layout": "vertical",
-            "contents": [
-                {
-                    "type": "text",
-                    "text": "【新着・更新】",
-                    "weight": "bold",
-                    "color": "#1DB446",
-                    "size": "xs"
-                },
-                {
-                    "type": "text",
-                    "text": safe_title,
-                    "weight": "bold",
-                    "size": "xs",
-                    "wrap": True,
-                    "margin": "xs"
-                }
-            ]
-        },
-        "footer": {
-            "type": "box",
-            "layout": "vertical",
-            "contents": [
-                {
-                    "type": "button",
-                    "style": "primary",
-                    "color": "#1DB446",
-                    "height": "sm",
-                    "action": {
-                        "type": "uri",
-                        "label": "詳細",
-                        "uri": link
-                    }
-                }
-            ]
-        }
-    }
 
 def extract_updates(soup):
     items = []
@@ -249,38 +170,39 @@ def main():
         print("「新入荷＆在庫更新情報」の新しい更新はありませんでした。")
         return
 
-    send_targets = new_items[:7]
-    bubbles = []
+    # 一度に送信する件数を上限5件（LINE APIの1回あたりの送信メッセージ枠上限）に制限
+    send_targets = new_items[:5]
+    messages = []
 
-    has_downloaded = False
+    # 全体ヘッダーメッセージ
+    messages.append(TextMessage(text=f"【新着・在庫更新情報】({len(send_targets)}件)"))
+
     for item_key, title, link in send_targets:
-        img_url = download_and_get_pages_url(item_key, link, headers)
-        if img_url != DEFAULT_IMG:
-            has_downloaded = True
-        bubble_json = create_bubble(title, link, img_url)
-        bubbles.append(bubble_json)
+        img_url = fetch_product_image(link, headers)
+        
+        # 画像メッセージを追加（PC版でも確実に描画される標準仕様）
+        messages.append(ImageMessage(original_content_url=img_url, preview_image_url=img_url))
+        
+        # テキスト＋リンクメッセージ
+        msg_text = f"■ {title}\n{link}"
+        messages.append(TextMessage(text=msg_text))
 
-    if has_downloaded:
-        commit_images()
-
-    carousel_json = {
-        "type": "carousel",
-        "contents": bubbles
-    }
-
-    flex_container = FlexContainer.from_dict(carousel_json)
-    flex_msg = FlexMessage(alt_text=f"新着・在庫更新情報 ({len(send_targets)}件)", contents=flex_container)
-
+    # LINE APIは1回の送信で最大5メッセージまでのため、分けてブロードキャスト
     configuration = Configuration(access_token=CHANNEL_ACCESS_TOKEN)
 
     try:
         with ApiClient(configuration) as api_client:
             line_bot_api = MessagingApi(api_client)
-            broadcast_request = BroadcastRequest(messages=[flex_msg])
-            line_bot_api.broadcast(broadcast_request)
+            
+            # 5メッセージずつに分割して送信
+            chunk_size = 5
+            for i in range(0, len(messages), chunk_size):
+                chunk = messages[i:i + chunk_size]
+                broadcast_request = BroadcastRequest(messages=chunk)
+                line_bot_api.broadcast(broadcast_request)
         
         mark_as_seen([(item_key, url, title) for item_key, title, url in send_targets])
-        print(f"★全登録者へ新着・在庫更新 {len(send_targets)}件のカルーセル通知を一括送信しました。")
+        print(f"★全登録者へ新着・在庫更新 {len(send_targets)}件を送信しました。")
     except Exception as e:
         print(f"★送信エラー: {e}")
 
