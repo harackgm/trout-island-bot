@@ -121,13 +121,13 @@ def main():
         item_key = generate_key(url, title)
         all_current_items.append((item_key, url, title))
 
-    # 【目的1】初回起動時は通知せず、すべてDB登録（初回セットアップ）して終了
+    # 【初回起動時】通知せず、すべてDB登録（初回セットアップ）して終了
     if is_first_run:
         mark_as_seen(all_current_items)
         print(f"★初回セットアップ完了: 過去データ {len(all_current_items)}件をすべてDB登録しました（通知は送信されません）。")
         return
 
-    # 【目的2】2回目以降の通常実行：未登録の新着差分のみをチェック
+    # 【通常実行時】未登録の新着差分のみをチェック
     new_items = []
     seen_keys = set()
     
@@ -141,7 +141,7 @@ def main():
         print("「新入荷＆在庫更新情報」の新しい更新はありませんでした。")
         return
 
-    # 送信前に今回検知されたデータを全件DB登録（次回への繰り越しを防止）
+    # 送信前に今回検知されたデータを全件DB登録
     mark_as_seen(all_current_items)
 
     # 1回の送信上限（最大5件）
