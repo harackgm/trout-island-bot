@@ -20,7 +20,7 @@ CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN', '').strip()
 TARGET_URL = "https://troutisland.shop-pro.jp/"
 DB_FILE = "products.db"
 
-# デフォルト画像（取得失敗時）
+# デフォルト画像（画像ホスティング失敗時）
 DEFAULT_IMG = "https://raw.githubusercontent.com/line/line-images/master/blogs/20200806/logo.png"
 
 def init_db():
@@ -69,6 +69,23 @@ def clean_text(text):
     text = re.sub(r'\s+', ' ', text)
     return text.strip()
 
+def upload_to_imgur(image_bytes):
+    """取得した画像データをImgurに匿名アップロードしてLINEで確実に表示可能なURLを生成"""
+    try:
+        headers = {"Authorization": "Client-ID 1c3eb7d8adfa2e3"}
+        response = requests.post(
+            "https://api.imgur.com/3/image",
+            headers=headers,
+            data={"image": image_bytes},
+            timeout=10
+        )
+        if response.status_code == 200:
+            data = response.json()
+            return data["data"]["link"]
+    except Exception as e:
+        print(f"Imgurアップロード失敗: {e}")
+    return DEFAULT_IMG
+
 def fetch_product_image(product_url, headers):
     try:
         res = requests.get(product_url, headers=headers, timeout=5)
@@ -87,7 +104,6 @@ def fetch_product_image(product_url, headers):
                 img_src = img_tag.get("src")
         
         if img_src:
-            # プロトコル補完
             if img_src.startswith("//"):
                 img_src = "https:" + img_src
             elif img_src.startswith("http://"):
@@ -95,9 +111,13 @@ def fetch_product_image(product_url, headers):
             elif not img_src.startswith("http"):
                 img_src = urljoin(product_url, img_src)
             
-            # サムネイル画像のクエリ削除
             clean_url = img_src.split('?')[0]
-            return clean_url
+            
+            # 画像本体を一度ダウンロード（GitHub Actions経由ならブロックされない）
+            img_res = requests.get(clean_url, headers=headers, timeout=5)
+            if img_res.status_code == 200:
+                # 確実に表示できる外部ホスティングへ転送
+                return upload_to_imgur(img_res.content)
             
     except Exception as e:
         print(f"画像取得スキップ ({product_url}): {e}")
