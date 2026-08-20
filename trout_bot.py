@@ -3,7 +3,7 @@ import sqlite3
 import requests
 import re
 import hashlib
-from urllib.parse import urljoin
+from urllib.parse import urljoin, quote
 from bs4 import BeautifulSoup
 
 # LINE Messaging API v3
@@ -70,7 +70,7 @@ def clean_text(text):
     return text.strip()
 
 def fetch_product_image(product_url, headers):
-    """個別商品ページから画像を抽出してPC/スマホ共に対応した正則HTTPSリンクを生成"""
+    """個別商品ページから画像を抽出し、PC版LINEでもブロックされないCDNプロキシURLを生成"""
     try:
         res = requests.get(product_url, headers=headers, timeout=5)
         res.encoding = res.apparent_encoding
@@ -88,7 +88,6 @@ def fetch_product_image(product_url, headers):
                 img_src = img_tag.get("src")
         
         if img_src:
-            # プロトコル制御（絶対パス化 ＋ HTTPS必須化）
             if img_src.startswith("//"):
                 img_src = "https:" + img_src
             elif img_src.startswith("http://"):
@@ -96,8 +95,9 @@ def fetch_product_image(product_url, headers):
             elif not img_src.startswith("http"):
                 img_src = urljoin(product_url, img_src)
             
-            # PC版LINEでのアクセス拒否を防ぐためクエリ文字列（パラメータ）は維持してそのまま返す
-            return img_src
+            # PC版LINEのアクセスブロックを完全回避するためにwsrv.nlプロキシを経由化
+            proxy_url = f"https://wsrv.nl/?url={quote(img_src)}&output=jpg"
+            return proxy_url
             
     except Exception as e:
         print(f"画像取得スキップ ({product_url}): {e}")
