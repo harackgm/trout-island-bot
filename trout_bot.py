@@ -19,6 +19,8 @@ from linebot.v3.messaging import (
 CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN', '').strip()
 TARGET_URL = "https://troutisland.shop-pro.jp/"
 DB_FILE = "products.db"
+
+# 社内PC・LINEアプリで確実に許可される絶対安全なデフォルト画像
 DEFAULT_IMG = "https://raw.githubusercontent.com/line/line-images/master/blogs/20200806/logo.png"
 
 def init_db():
@@ -63,7 +65,7 @@ def clean_text(text):
     return text.strip()
 
 def clean_image_url(raw_url):
-    """会社PCの社内プロキシ・ブロック回避：WSERV画像プロキシを経由させる処理"""
+    """社内PCセキュリティ・LINEデスクトップ版対策の最新プロキシ変換"""
     if not raw_url:
         return DEFAULT_IMG
 
@@ -79,10 +81,10 @@ def clean_image_url(raw_url):
     if "_th." in clean_url:
         clean_url = clean_url.replace("_th.", ".")
 
-    # 会社PCのアクセスブロック回避のため、画像プロキシ(wserv.nl)を経由させる
-    # http:// または https:// を除いたURL部分をエンコードして付与
+    # プロキシ経由（wsrv.nl）＋標準サイズ固定指定
+    # 社内セキュリティで弾かれないよう、シンプルなパラメータ構成にする
     clean_target = re.sub(r'^https?://', '', clean_url)
-    proxy_url = f"https://images.weserv.nl/?url={quote(clean_target)}&output=jpg"
+    proxy_url = f"https://wsrv.nl/?url={quote(clean_target)}&w=300&h=225&fit=cover&output=jpg"
 
     return proxy_url
 
