@@ -20,7 +20,7 @@ CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN', '').strip()
 TARGET_URL = "https://troutisland.shop-pro.jp/"
 DB_FILE = "products.db"
 
-# デフォルト画像（取得失敗時）
+# デフォルト画像
 DEFAULT_IMG = "https://raw.githubusercontent.com/line/line-images/master/blogs/20200806/logo.png"
 
 def init_db():
@@ -36,7 +36,6 @@ def init_db():
     ''')
     conn.commit()
     
-    # DBが空（初回実行）かどうかチェック
     c.execute('SELECT COUNT(*) FROM seen_items')
     count = c.fetchone()[0]
     conn.close()
@@ -70,19 +69,17 @@ def clean_text(text):
     return text.strip()
 
 def fetch_product_image(product_url, headers):
-    """個別商品ページから画像を抽出し、PC版LINEでもブロックされないCDNプロキシURLを生成"""
+    """商品画像を取得し、PC版LINEでもブロックされないプロキシURLを生成"""
     try:
         res = requests.get(product_url, headers=headers, timeout=5)
         res.encoding = res.apparent_encoding
         p_soup = BeautifulSoup(res.text, "html.parser")
         
         img_src = None
-        # OGP画像メタタグの取得
         og_img = p_soup.find("meta", property="og:image")
         if og_img and og_img.get("content"):
             img_src = og_img.get("content")
         else:
-            # 商品画像タグの取得
             img_tag = p_soup.find("img", id="product_image") or p_soup.find("img", class_="product_image")
             if img_tag and img_tag.get("src"):
                 img_src = img_tag.get("src")
@@ -95,9 +92,8 @@ def fetch_product_image(product_url, headers):
             elif not img_src.startswith("http"):
                 img_src = urljoin(product_url, img_src)
             
-            # PC版LINEのアクセスブロックを完全回避するためにwsrv.nlプロキシを経由化
-            proxy_url = f"https://wsrv.nl/?url={quote(img_src)}&output=jpg"
-            return proxy_url
+            # images.weserv.nl プロキシを経由して直接画像を出力（PC版LINEのブロック回避）
+            return f"https://images.weserv.nl/?url={quote(img_src)}&default={quote(DEFAULT_IMG)}"
             
     except Exception as e:
         print(f"画像取得スキップ ({product_url}): {e}")
@@ -192,7 +188,6 @@ def main():
         print("エラー: Secrets LINE_CHANNEL_ACCESS_TOKEN が設定されていません。")
         return
 
-    # DB初期化 & 初回起動（DBが空）かどうかチェック
     is_first_run = init_db()
 
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
@@ -206,7 +201,6 @@ def main():
 
     raw_items = extract_updates(soup)
     
-    # 初回実行時：全アイテムをDBに登録して通知はスキップする
     if is_first_run:
         all_to_mark = []
         for title, url in raw_items:
@@ -214,10 +208,9 @@ def main():
             all_to_mark.append((item_key, url, title))
         
         mark_as_seen(all_to_mark)
-        print(f"★初回セットアップ完了: 過去のデータ {len(all_to_mark)}件をDBに登録しました。（LINE通知はスキップしました）")
+        print(f"★初回セットアップ完了: 過去のデータ {len(all_to_mark)}件をDBに登録しました。")
         return
 
-    # 2回目以降：未通知の差分だけを抽出
     new_items = []
     seen_keys = set()
     
