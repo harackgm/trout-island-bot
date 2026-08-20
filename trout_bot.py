@@ -3,7 +3,7 @@ import sqlite3
 import requests
 import re
 import hashlib
-from urllib.parse import urljoin, quote
+from urllib.parse import urljoin
 from bs4 import BeautifulSoup
 
 # LINE Messaging API v3
@@ -20,7 +20,7 @@ CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN', '').strip()
 TARGET_URL = "https://troutisland.shop-pro.jp/"
 DB_FILE = "products.db"
 
-# 社内PCで100%許可されるデフォルト画像
+# デフォルト画像（取得失敗時）
 DEFAULT_IMG = "https://raw.githubusercontent.com/line/line-images/master/blogs/20200806/logo.png"
 
 def init_db():
@@ -69,26 +69,6 @@ def clean_text(text):
     text = re.sub(r'\s+', ' ', text)
     return text.strip()
 
-def clean_image_url(raw_url):
-    """社内PCセキュリティ回避：GitHub公式の画像プロキシ（camo）形式への変換プロキシ"""
-    if not raw_url:
-        return DEFAULT_IMG
-
-    if raw_url.startswith("//"):
-        raw_url = "https:" + raw_url
-    elif raw_url.startswith("http://"):
-        raw_url = raw_url.replace("http://", "https://", 1)
-
-    clean_url = raw_url.split('?')[0]
-    if "_th." in clean_url:
-        clean_url = clean_url.replace("_th.", ".")
-
-    # GitHub Actions等の環境で最も通りやすい高速プロキシ変換
-    clean_target = re.sub(r'^https?://', '', clean_url)
-    proxy_url = f"https://wsrv.nl/?url={quote(clean_target)}&w=300&h=225&fit=cover&output=jpg"
-
-    return proxy_url
-
 def fetch_product_image(product_url, headers):
     try:
         res = requests.get(product_url, headers=headers, timeout=5)
@@ -96,16 +76,28 @@ def fetch_product_image(product_url, headers):
         p_soup = BeautifulSoup(res.text, "html.parser")
         
         img_src = None
+        # OGP画像の取得
         og_img = p_soup.find("meta", property="og:image")
         if og_img and og_img.get("content"):
             img_src = og_img.get("content")
         else:
+            # 商品本体画像の取得
             img_tag = p_soup.find("img", id="product_image") or p_soup.find("img", class_="product_image")
             if img_tag and img_tag.get("src"):
-                img_src = urljoin(product_url, img_tag.get("src"))
+                img_src = img_tag.get("src")
         
         if img_src:
-            return clean_image_url(img_src)
+            # プロトコル補完
+            if img_src.startswith("//"):
+                img_src = "https:" + img_src
+            elif img_src.startswith("http://"):
+                img_src = img_src.replace("http://", "https://", 1)
+            elif not img_src.startswith("http"):
+                img_src = urljoin(product_url, img_src)
+            
+            # サムネイル画像のクエリ削除
+            clean_url = img_src.split('?')[0]
+            return clean_url
             
     except Exception as e:
         print(f"画像取得スキップ ({product_url}): {e}")
