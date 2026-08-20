@@ -1,9 +1,9 @@
 name: Trout Island Watcher
 
 on:
-  schedule:
-    - cron: '*/15 * * * *'  # 15分おきに自動実行
-  workflow_dispatch:        # 手動実行ボタン(Run workflow)を有効化
+  workflow_dispatch:
+  repository_dispatch:
+    types: [cron_trigger]
 
 jobs:
   build:
@@ -13,7 +13,7 @@ jobs:
         uses: actions/checkout@v3
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/python-version@v4
         with:
           python-version: '3.10'
 
@@ -22,16 +22,16 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests beautifulsoup4 line-bot-sdk
 
-      - name: Run bot
+      - name: Run Trout Island Watcher Script
         env:
           LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
-          LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
+          IMGUR_CLIENT_ID: ${{ secrets.IMGUR_CLIENT_ID }}
         run: python trout_bot.py
 
       - name: Commit and push DB changes
         run: |
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add products.db
-          git commit -m "Update DB with seen items" || exit 0
+          git commit -m "Update products.db with new sent items" || exit 0
           git push
