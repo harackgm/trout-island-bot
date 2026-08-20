@@ -70,7 +70,7 @@ def clean_text(text):
     return text.strip()
 
 def fetch_product_image(product_url, headers):
-    """個別商品ページから画像を抽出して正しくHTTPSリンク化する"""
+    """個別商品ページから画像を抽出してPC/スマホ共に対応した正則HTTPSリンクを生成"""
     try:
         res = requests.get(product_url, headers=headers, timeout=5)
         res.encoding = res.apparent_encoding
@@ -88,7 +88,7 @@ def fetch_product_image(product_url, headers):
                 img_src = img_tag.get("src")
         
         if img_src:
-            # スキーム調整（LINE仕様上、必ずhttps化が必要）
+            # プロトコル制御（絶対パス化 ＋ HTTPS必須化）
             if img_src.startswith("//"):
                 img_src = "https:" + img_src
             elif img_src.startswith("http://"):
@@ -96,9 +96,8 @@ def fetch_product_image(product_url, headers):
             elif not img_src.startswith("http"):
                 img_src = urljoin(product_url, img_src)
             
-            # クエリパラメータ削除
-            clean_url = img_src.split('?')[0]
-            return clean_url
+            # PC版LINEでのアクセス拒否を防ぐためクエリ文字列（パラメータ）は維持してそのまま返す
+            return img_src
             
     except Exception as e:
         print(f"画像取得スキップ ({product_url}): {e}")
