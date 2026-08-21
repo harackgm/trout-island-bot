@@ -12,7 +12,8 @@ from linebot.v3.messaging import (
     ApiClient,
     MessagingApi,
     BroadcastRequest,
-    TextMessage
+    FlexMessage,
+    FlexContainer
 )
 
 CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN', '').strip()
@@ -96,6 +97,62 @@ def extract_updates(soup):
 
     return items
 
+def create_carousel_flex(new_items):
+    """新着商品をカルーセル形式のFlex Message JSONに変換"""
+    bubbles = []
+    
+    for item_key, title, link in new_items:
+        bubble = {
+            "type": "bubble",
+            "size": "micro",
+            "body": {
+                "type": "box",
+                "layout": "vertical",
+                "contents": [
+                    {
+                        "type": "text",
+                        "text": "新着・在庫更新",
+                        "weight": "bold",
+                        "color": "#1DB446",
+                        "size": "xs"
+                    },
+                    {
+                        "type": "text",
+                        "text": title,
+                        "weight": "bold",
+                        "size": "sm",
+                        "wrap": True,
+                        "margin": "md",
+                        "maxLines": 3
+                    }
+                ]
+            },
+            "footer": {
+                "type": "box",
+                "layout": "vertical",
+                "contents": [
+                    {
+                        "type": "button",
+                        "action": {
+                            "type": "uri",
+                            "label": "商品を見る",
+                            "uri": link
+                        },
+                        "style": "primary",
+                        "color": "#00B900",
+                        "size": "sm"
+                    }
+                ]
+            }
+        }
+        bubbles.append(bubble)
+
+    flex_payload = {
+        "type": "carousel",
+        "contents": bubbles
+    }
+    return flex_payload
+
 def main():
     if not CHANNEL_ACCESS_TOKEN:
         print("エラー: Secrets LINE_CHANNEL_ACCESS_TOKEN が設定されていません。")
@@ -144,29 +201,27 @@ def main():
     # 送信前に今回検知されたデータを全件DB登録
     mark_as_seen(all_current_items)
 
-    # 1回の送信上限（最大5件）
-    send_targets = new_items[:5]
-    messages = []
+    # 1回の送信上限（カルーセルは最大10件まで一括送信可能）
+    send_targets = new_items[:10]
 
-    messages.append(TextMessage(text=f"【新着・在庫更新情報】({len(send_targets)}件)"))
-
-    for item_key, title, link in send_targets:
-        msg_text = f"■ {title}\n{link}"
-        messages.append(TextMessage(text=msg_text))
+    # カルーセルデータ作成
+    flex_json = create_carousel_flex(send_targets)
+    flex_container = FlexContainer.from_dict(flex_json)
+    
+    flex_message = FlexMessage(
+        alt_text=f"【新着・在庫更新情報】({len(send_targets)}件)",
+        contents=flex_container
+    )
 
     configuration = Configuration(access_token=CHANNEL_ACCESS_TOKEN)
 
     try:
         with ApiClient(configuration) as api_client:
             line_bot_api = MessagingApi(api_client)
-            
-            chunk_size = 5
-            for i in range(0, len(messages), chunk_size):
-                chunk = messages[i:i + chunk_size]
-                broadcast_request = BroadcastRequest(messages=chunk)
-                line_bot_api.broadcast(broadcast_request)
+            broadcast_request = BroadcastRequest(messages=[flex_message])
+            line_bot_api.broadcast(broadcast_request)
         
-        print(f"★全登録者へ新着・在庫更新 {len(send_targets)}件を正常送信しました。")
+        print(f"★全登録者へカルーセル新着・在庫更新 {len(send_targets)}件を正常送信しました。")
     except Exception as e:
         print(f"★送信エラー: {e}")
 
