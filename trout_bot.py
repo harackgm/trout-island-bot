@@ -3,7 +3,7 @@ import sqlite3
 import requests
 import re
 import hashlib
-from urllib.parse import urljoin
+from urllib.parse import urljoin, quote
 from bs4 import BeautifulSoup
 
 # LINE Messaging API v3
@@ -19,6 +19,9 @@ from linebot.v3.messaging import (
 CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN', '').strip()
 TARGET_URL = "https://troutisland.shop-pro.jp/"
 DB_FILE = "products.db"
+
+# デフォルト画像
+DEFAULT_IMG = "https://raw.githubusercontent.com/line/line-images/master/blogs/20200806/logo.png"
 
 def init_db():
     """DBを初期化し、テーブルが空（初回起動）かどうかを判定する"""
@@ -40,7 +43,7 @@ def init_db():
     return count == 0
 
 def generate_key(date_str, title, url):
-    """日付・タイトル・URLの3つを組み合わせて唯一無二の識別キーを作成"""
+    """日付・タイトル・URLを組み合わせて識別キーを作成"""
     raw_str = f"{date_str}_{title}_{url}"
     return hashlib.md5(raw_str.encode('utf-8')).hexdigest()
 
@@ -53,7 +56,7 @@ def is_seen(item_key):
     return row is not None
 
 def mark_as_seen(items):
-    """取得したアイテムをDBに登録して既読化"""
+    """取得したアイテムを確実にDBに登録して既読化"""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     for item_key, url, title in items:
@@ -68,8 +71,92 @@ def clean_text(text):
     text = re.sub(r'\s+', ' ', text)
     return text.strip()
 
+def fetch_product_image(product_url, headers):
+    """商品個別ページから画像を取得し、プロキシURLを生成"""
+    try:
+        res = requests.get(product_url, headers=headers, timeout=5)
+        res.encoding = res.apparent_encoding
+        p_soup = BeautifulSoup(res.text, "html.parser")
+        
+        img_src = None
+        og_img = p_soup.find("meta", property="og:image")
+        if og_img and og_img.get("content"):
+            img_src = og_img.get("content")
+        else:
+            img_tag = p_soup.find("img", id="product_image") or p_soup.find("img", class_="product_image")
+            if img_tag and img_tag.get("src"):
+                img_src = img_tag.get("src")
+        
+        if img_src:
+            if img_src.startswith("//"):
+                img_src = "https:" + img_src
+            elif img_src.startswith("http://"):
+                img_src = img_src.replace("http://", "https://", 1)
+            elif not img_src.startswith("http"):
+                img_src = urljoin(product_url, img_src)
+            
+            return f"https://images.weserv.nl/?url={quote(img_src)}&default={quote(DEFAULT_IMG)}"
+            
+    except Exception as e:
+        print(f"画像取得スキップ ({product_url}): {e}")
+    
+    return DEFAULT_IMG
+
+def create_bubble(title, link, img_url):
+    safe_title = title if len(title) <= 60 else title[:57] + "..."
+    
+    return {
+        "type": "bubble",
+        "size": "micro",
+        "hero": {
+            "type": "image",
+            "url": img_url,
+            "size": "full",
+            "aspectRatio": "4:3",
+            "aspectMode": "cover"
+        },
+        "body": {
+            "type": "box",
+            "layout": "vertical",
+            "contents": [
+                {
+                    "type": "text",
+                    "text": "【新着・更新】",
+                    "weight": "bold",
+                    "color": "#1DB446",
+                    "size": "xs"
+                },
+                {
+                    "type": "text",
+                    "text": safe_title,
+                    "weight": "bold",
+                    "size": "xs",
+                    "wrap": True,
+                    "margin": "xs"
+                }
+            ]
+        },
+        "footer": {
+            "type": "box",
+            "layout": "vertical",
+            "contents": [
+                {
+                    "type": "button",
+                    "style": "primary",
+                    "color": "#1DB446",
+                    "height": "sm",
+                    "action": {
+                        "type": "uri",
+                        "label": "詳細",
+                        "uri": link
+                    }
+                }
+            ]
+        }
+    }
+
 def extract_updates(soup):
-    """HPから日付、タイトル、リンクを正確に一組として抽出"""
+    """HPから日付、タイトル、リンクを抽出"""
     items = []
     
     target_blocks = []
@@ -91,8 +178,6 @@ def extract_updates(soup):
                 continue
 
             parent_text = clean_text(a.parent.get_text()) if a.parent else ""
-            
-            # 日付（例: 8/20, 08/20）を探す
             date_match = re.search(r'(\d{1,2}/\d{1,2})', text) or re.search(r'(\d{1,2}/\d{1,2})', parent_text)
             date_str = date_match.group(1) if date_match else "NODATE"
 
@@ -101,63 +186,6 @@ def extract_updates(soup):
                 items.append((date_str, text, full_url))
 
     return items
-
-def create_carousel_flex(new_items):
-    """新着商品をカルーセル形式（横スクロールカード）のFlex Message JSONに変換"""
-    bubbles = []
-    
-    for item_key, date_str, title, link in new_items:
-        display_title = f"[{date_str}] {title}" if date_str != "NODATE" else title
-        bubble = {
-            "type": "bubble",
-            "size": "micro",
-            "body": {
-                "type": "box",
-                "layout": "vertical",
-                "contents": [
-                    {
-                        "type": "text",
-                        "text": "新着・再入荷情報",
-                        "weight": "bold",
-                        "color": "#1DB446",
-                        "size": "xs"
-                    },
-                    {
-                        "type": "text",
-                        "text": display_title,
-                        "weight": "bold",
-                        "size": "sm",
-                        "wrap": True,
-                        "margin": "md",
-                        "maxLines": 3
-                    }
-                ]
-            },
-            "footer": {
-                "type": "box",
-                "layout": "vertical",
-                "contents": [
-                    {
-                        "type": "button",
-                        "action": {
-                            "type": "uri",
-                            "label": "商品を見る",
-                            "uri": link
-                        },
-                        "style": "primary",
-                        "color": "#00B900",
-                        "size": "sm"
-                    }
-                ]
-            }
-        }
-        bubbles.append(bubble)
-
-    flex_payload = {
-        "type": "carousel",
-        "contents": bubbles
-    }
-    return flex_payload
 
 def main():
     if not CHANNEL_ACCESS_TOKEN:
@@ -177,16 +205,19 @@ def main():
 
     raw_items = extract_updates(soup)
     
-    all_current_items = []
-    for date_str, title, url in raw_items:
-        item_key = generate_key(date_str, title, url)
-        all_current_items.append((item_key, url, f"[{date_str}] {title}"))
-
+    # 1. 初回起動時の処理（DBへ全登録して即終了）
     if is_first_run:
-        mark_as_seen(all_current_items)
-        print(f"★初回セットアップ完了: 過去データ {len(all_current_items)}件をすべてDB登録しました（通知は送信されません）。")
+        all_to_mark = []
+        for date_str, title, url in raw_items:
+            display_title = f"[{date_str}] {title}" if date_str != "NODATE" else title
+            item_key = generate_key(date_str, title, url)
+            all_to_mark.append((item_key, url, display_title))
+        
+        mark_as_seen(all_to_mark)
+        print(f"★初回セットアップ完了: 過去のデータ {len(all_to_mark)}件をDBに登録しました（通知は送信しません）。")
         return
 
+    # 2. 2回目以降の差分チェック
     new_items = []
     seen_keys = set()
     
@@ -194,34 +225,41 @@ def main():
         item_key = generate_key(date_str, title, url)
         if item_key not in seen_keys and not is_seen(item_key):
             seen_keys.add(item_key)
-            new_items.append((item_key, date_str, title, url))
+            display_title = f"[{date_str}] {title}" if date_str != "NODATE" else title
+            new_items.append((item_key, display_title, url))
 
     if not new_items:
         print("「新入荷＆在庫更新情報」の新しい更新はありませんでした。")
         return
 
-    # 今回の全アイテムをDB登録
-    mark_as_seen(all_current_items)
+    # 最新最大7件を送信
+    send_targets = new_items[:7]
+    bubbles = []
 
-    send_targets = new_items[:10]
+    for item_key, title, link in send_targets:
+        img_url = fetch_product_image(link, headers)
+        bubble_json = create_bubble(title, link, img_url)
+        bubbles.append(bubble_json)
 
-    flex_json = create_carousel_flex(send_targets)
-    flex_container = FlexContainer.from_dict(flex_json)
-    
-    flex_message = FlexMessage(
-        alt_text=f"【入荷・更新情報】({len(send_targets)}件)",
-        contents=flex_container
-    )
+    carousel_json = {
+        "type": "carousel",
+        "contents": bubbles
+    }
+
+    flex_container = FlexContainer.from_dict(carousel_json)
+    flex_msg = FlexMessage(alt_text=f"新着・在庫更新情報 ({len(send_targets)}件)", contents=flex_container)
 
     configuration = Configuration(access_token=CHANNEL_ACCESS_TOKEN)
 
     try:
         with ApiClient(configuration) as api_client:
             line_bot_api = MessagingApi(api_client)
-            broadcast_request = BroadcastRequest(messages=[flex_message])
+            broadcast_request = BroadcastRequest(messages=[flex_msg])
             line_bot_api.broadcast(broadcast_request)
         
-        print(f"★全登録者へカルーセル新着・在庫更新 {len(send_targets)}件を正常送信しました。")
+        # 送信完了後に既読登録
+        mark_as_seen([(item_key, url, title) for item_key, title, url in send_targets])
+        print(f"★全登録者へ新着・在庫更新 {len(send_targets)}件のカルーセル通知を一括送信しました。")
     except Exception as e:
         print(f"★送信エラー: {e}")
 
