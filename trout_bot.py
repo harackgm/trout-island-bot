@@ -39,8 +39,9 @@ def init_db():
     conn.close()
     return count == 0
 
-def generate_key(url, title):
-    raw_str = f"{url}_{title}"
+def generate_key(date_str, title, url):
+    """日付・タイトル・URLの3つを組み合わせて唯一無二の識別キーを作成"""
+    raw_str = f"{date_str}_{title}_{url}"
     return hashlib.md5(raw_str.encode('utf-8')).hexdigest()
 
 def is_seen(item_key):
@@ -68,12 +69,13 @@ def clean_text(text):
     return text.strip()
 
 def extract_updates(soup):
+    """HPから日付、タイトル、リンクを正確に一組として抽出"""
     items = []
     
     target_blocks = []
     for tag in soup.find_all(['td', 'div', 'p', 'table']):
         text = tag.get_text()
-        if ('新入荷' in text or '在庫更新' in text) and not ('オススメ' in text or 'おすすめ' in text):
+        if ('新入荷' in text or '在庫更新' in text or '再入荷' in text or '新色' in text or '更新！' in text) and not ('オススメ' in text or 'おすすめ' in text):
             target_blocks.append(tag)
 
     if not target_blocks:
@@ -89,11 +91,14 @@ def extract_updates(soup):
                 continue
 
             parent_text = clean_text(a.parent.get_text()) if a.parent else ""
-            has_date = bool(re.search(r'\d{1,2}/\d{1,2}', text) or re.search(r'\d{1,2}/\d{1,2}', parent_text))
+            
+            # 日付（例: 8/20, 08/20）を探す
+            date_match = re.search(r'(\d{1,2}/\d{1,2})', text) or re.search(r'(\d{1,2}/\d{1,2})', parent_text)
+            date_str = date_match.group(1) if date_match else "NODATE"
 
-            if has_date and ('pid=' in href or 'shop-pro.jp' in href):
+            if (date_match or '更新' in text or '入荷' in text) and ('pid=' in href or 'shop-pro.jp' in href or 'mode=' in href):
                 full_url = urljoin(TARGET_URL, href)
-                items.append((text, full_url))
+                items.append((date_str, text, full_url))
 
     return items
 
@@ -101,7 +106,8 @@ def create_carousel_flex(new_items):
     """新着商品をカルーセル形式（横スクロールカード）のFlex Message JSONに変換"""
     bubbles = []
     
-    for item_key, title, link in new_items:
+    for item_key, date_str, title, link in new_items:
+        display_title = f"[{date_str}] {title}" if date_str != "NODATE" else title
         bubble = {
             "type": "bubble",
             "size": "micro",
@@ -111,14 +117,14 @@ def create_carousel_flex(new_items):
                 "contents": [
                     {
                         "type": "text",
-                        "text": "新着・在庫更新",
+                        "text": "新着・再入荷情報",
                         "weight": "bold",
                         "color": "#1DB446",
                         "size": "xs"
                     },
                     {
                         "type": "text",
-                        "text": title,
+                        "text": display_title,
                         "weight": "bold",
                         "size": "sm",
                         "wrap": True,
@@ -158,7 +164,6 @@ def main():
         print("エラー: Secrets LINE_CHANNEL_ACCESS_TOKEN が設定されていません。")
         return
 
-    # 初回起動（DBにデータが一切ない状態）かどうか判定
     is_first_run = init_db()
 
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
@@ -172,44 +177,39 @@ def main():
 
     raw_items = extract_updates(soup)
     
-    # サイト上の全アイテム情報を整理
     all_current_items = []
-    for title, url in raw_items:
-        item_key = generate_key(url, title)
-        all_current_items.append((item_key, url, title))
+    for date_str, title, url in raw_items:
+        item_key = generate_key(date_str, title, url)
+        all_current_items.append((item_key, url, f"[{date_str}] {title}"))
 
-    # 【初回起動時】通知せず、すべてDB登録（初回セットアップ）して終了
     if is_first_run:
         mark_as_seen(all_current_items)
         print(f"★初回セットアップ完了: 過去データ {len(all_current_items)}件をすべてDB登録しました（通知は送信されません）。")
         return
 
-    # 【通常実行時】未登録の新着差分のみをチェック
     new_items = []
     seen_keys = set()
     
-    for title, url in raw_items:
-        item_key = generate_key(url, title)
+    for date_str, title, url in raw_items:
+        item_key = generate_key(date_str, title, url)
         if item_key not in seen_keys and not is_seen(item_key):
             seen_keys.add(item_key)
-            new_items.append((item_key, title, url))
+            new_items.append((item_key, date_str, title, url))
 
     if not new_items:
         print("「新入荷＆在庫更新情報」の新しい更新はありませんでした。")
         return
 
-    # 送信前に今回検知されたデータを全件DB登録
+    # 今回の全アイテムをDB登録
     mark_as_seen(all_current_items)
 
-    # 1回の送信上限（カルーセルは最大10件まで一度に送信可能）
     send_targets = new_items[:10]
 
-    # カルーセルデータ作成
     flex_json = create_carousel_flex(send_targets)
     flex_container = FlexContainer.from_dict(flex_json)
     
     flex_message = FlexMessage(
-        alt_text=f"【新着・在庫更新情報】({len(send_targets)}件)",
+        alt_text=f"【入荷・更新情報】({len(send_targets)}件)",
         contents=flex_container
     )
 
