@@ -19,7 +19,7 @@ from linebot.v3.messaging import (
 
 # ==========================================
 # ★テストモード設定（True: 強制通知 / False: 通常動作）
-# 特価コーナー優先表示テスト
+# 特価コーナー抽出精度向上のテスト
 # ==========================================
 TEST_MODE = True
 MAX_NOTIFY_LIMIT = 10 if TEST_MODE else 5
@@ -150,7 +150,7 @@ def extract_updates(soup):
     return unique_items
 
 def extract_sale_items():
-    """特価コーナーのURLへアクセスし、中の商品と画像を個別に抽出する"""
+    """特価コーナーのURLへアクセスし、画像を持つ本物の商品だけを抽出する"""
     items = []
     try:
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
@@ -169,21 +169,27 @@ def extract_sale_items():
                         products[pid] = {"title": "", "img_url": None}
                     
                     text = clean_text(a.get_text())
-                    if len(text) > len(products[pid]["title"]):
-                        products[pid]["title"] = text
+                    # ★安全対策: 意味のない短いテキストや、単なる価格表示、SOLD OUTをタイトルから除外
+                    if text and "SOLD OUT" not in text and not re.fullmatch(r'[\d,]+円.*', text):
+                        if len(text) > len(products[pid]["title"]):
+                            products[pid]["title"] = text
                         
                     img_tag = a.find('img')
                     if img_tag and img_tag.get('src'):
                         raw_src = img_tag.get('src')
-                        img_url = urljoin(SALE_URL, raw_src).replace("http://", "https://")
-                        parsed = urllib.parse.urlparse(img_url)
-                        safe_path = urllib.parse.quote(parsed.path)
-                        products[pid]["img_url"] = urllib.parse.urlunparse((parsed.scheme, parsed.netloc, safe_path, parsed.params, parsed.query, parsed.fragment))
+                        # 小さなアイコン画像などは除外
+                        if "spacer" not in raw_src and "icon" not in raw_src:
+                            img_url = urljoin(SALE_URL, raw_src).replace("http://", "https://")
+                            parsed = urllib.parse.urlparse(img_url)
+                            safe_path = urllib.parse.quote(parsed.path)
+                            products[pid]["img_url"] = urllib.parse.urlunparse((parsed.scheme, parsed.netloc, safe_path, parsed.params, parsed.query, parsed.fragment))
 
         for pid, data in products.items():
-            title = data["title"] if data["title"] else f"特価アイテム (ID:{pid})"
+            title = data["title"]
             img_url = data["img_url"]
-            items.append((title, SALE_URL, img_url, "特価コーナー！"))
+            # ★安全対策: 「画像」と「タイトル」が両方揃っているものだけを本物の商品として扱う（サイドバー誤検知をブロック）
+            if title and img_url:
+                items.append((title, SALE_URL, img_url, "特価コーナー！"))
             
     except Exception as e:
         print(f"特価コーナー取得エラー: {e}")
@@ -306,15 +312,12 @@ def main():
         print(f"サイトアクセスエラー: {e}")
         return
 
-    # 通常商品の抽出
     raw_items = extract_updates(soup)
     
-    # ★スマート検知: 見落とし防止のため「特価」で判定
     clean_site_text = clean_text(soup.get_text())
     if "特価" in clean_site_text:
         print("★特価コーナー表示を検知しました。特価商品をチェックします。")
         sale_items = extract_sale_items()
-        # ★優先度アップ: 特価商品をリストの「先頭」に追加して押し出しを防止
         raw_items = sale_items + raw_items 
 
     all_current_items = [(generate_key(url, title), url, title) for title, url, img_url, keyword in raw_items]
