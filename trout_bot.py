@@ -15,6 +15,7 @@ from linebot.v3.messaging import (
     FlexMessage,
     FlexContainer
 )
+from linebot.v3.exceptions import ApiException
 
 CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN', '').strip()
 USER_ID = os.environ.get('LINE_USER_ID', '').strip()
@@ -104,7 +105,7 @@ def create_bubble(title, link, img_url):
     
     return {
         "type": "bubble",
-        "size": "deca",  # LINE規格上の正しい1段階上のサイズ(micro → deca)
+        "size": "deca",
         "hero": {
             "type": "image",
             "url": img_url,
@@ -153,7 +154,6 @@ def create_bubble(title, link, img_url):
     }
 
 def extract_updates(soup):
-    """厳密に日付とリンクを紐付けて抽出"""
     items = []
     
     target_blocks = []
@@ -174,10 +174,7 @@ def extract_updates(soup):
             if not href or 'mode=cate' in href or 'cart' in href or 'myaccount' in href or href in ['/', '#']:
                 continue
 
-            # 1. リンク自身のテキストから日付を探す
             date_match = re.search(r'(\d{1,2}/\d{1,2})', text)
-            
-            # 2. リンク自体に日付が無い場合、直前の文字列から探す
             if not date_match:
                 prev = a.previous_sibling
                 if prev and isinstance(prev, str):
@@ -240,7 +237,7 @@ def main():
         print("「新入荷＆在庫更新情報」の新しい更新はありませんでした。")
         return
 
-    # 一回の送信件数を最大3件に制限
+    # 1回の送信件数を最大3件に制限
     send_targets = new_items[:3]
     bubbles = []
 
@@ -267,6 +264,9 @@ def main():
         
         mark_as_seen([(item_key, url, title) for item_key, title, url in send_targets])
         print(f"★管理ユーザー宛てに新着・在庫更新 {len(send_targets)}件のテスト通知（decaサイズ）を送信しました。")
+    except ApiException as e:
+        print(f"★LINE API エラー詳細: {e.status} {e.reason}")
+        print(f"★エラーレスポンス内容: {e.body}")
     except Exception as e:
         print(f"★送信エラー: {e}")
 
