@@ -104,7 +104,7 @@ def create_bubble(title, link, img_url):
     
     return {
         "type": "bubble",
-        "size": "small",  # micro から small に拡大
+        "size": "deca",  # LINE規格上の正しい1段階上のサイズ(micro → deca)
         "hero": {
             "type": "image",
             "url": img_url,
@@ -262,12 +262,11 @@ def main():
     try:
         with ApiClient(configuration) as api_client:
             line_bot_api = MessagingApi(api_client)
-            # 全体放送(broadcast)ではなく指定のUSER_ID宛て(push)に変更
             push_request = PushMessageRequest(to=USER_ID, messages=[flex_msg])
             line_bot_api.push_message(push_request)
         
         mark_as_seen([(item_key, url, title) for item_key, title, url in send_targets])
-        print(f"★管理ユーザー宛てに新着・在庫更新 {len(send_targets)}件のテスト通知（smallサイズ）を送信しました。")
+        print(f"★管理ユーザー宛てに新着・在庫更新 {len(send_targets)}件のテスト通知（decaサイズ）を送信しました。")
     except Exception as e:
         print(f"★送信エラー: {e}")
 
