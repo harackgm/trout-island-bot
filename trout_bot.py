@@ -18,7 +18,7 @@ from linebot.v3.messaging import (
 
 # ==========================================
 # ★テストモード設定（True: 強制5件通知 / False: 通常動作）
-# デザイン確認が終わったら False に戻してください。
+# デザイン・画像の確認が終わったら False に戻してください。
 # ==========================================
 TEST_MODE = True
 MAX_NOTIFY_LIMIT = 5
@@ -101,19 +101,6 @@ def extract_updates(soup):
             if has_date and ('pid=' in href or 'shop-pro.jp' in href):
                 full_url = urljoin(TARGET_URL, href)
                 
-                img_url = None
-                img_tag = a.find('img')
-                if not img_tag:
-                    parent = a.find_parent(['td', 'div', 'li'])
-                    if parent:
-                        img_tag = parent.find('img')
-                
-                if img_tag and img_tag.get('src'):
-                    raw_img_src = img_tag.get('src')
-                    img_url = urljoin(TARGET_URL, raw_img_src).replace("http://", "https://")
-                else:
-                    img_url = "https://via.placeholder.com/300x300.png?text=No+Image"
-                
                 status_keyword = "更新・お知らせ"
                 full_check_text = text + " " + parent_text
                 if "新入荷" in full_check_text:
@@ -124,7 +111,8 @@ def extract_updates(soup):
                     status_keyword = "ご予約開始！"
 
                 extracted_texts.add(text)
-                items.append((text, full_url, img_url, status_keyword))
+                # 画像URLは後で個別取得するため、ここでは None を入れておく
+                items.append((text, full_url, None, status_keyword))
 
         # 2. リンクなし（イレギュラー告知）の抽出
         lines = block.get_text(separator='\n').split('\n')
@@ -135,23 +123,19 @@ def extract_updates(soup):
             
             # 「店頭販売中」や「ネット販売」を含む行を検知
             if "店頭販売中" in clean_line or "ネット販売" in clean_line:
-                # 既にリンクありとして抽出済みのテキストが含まれていれば除外
                 if any(ext_text in clean_line for ext_text in extracted_texts):
                     continue
                 
-                # 「↑」などの記号があれば、前の行と結合して商品名にする
                 title = clean_line
                 if "↑" in clean_line and i > 0:
                     title = clean_text(lines[i-1]) + " " + clean_line
 
-                # リンクなし用の設定
                 link = "" 
-                img_url = "https://via.placeholder.com/300x300.png?text=No+Image"
                 status_keyword = "店頭販売中！"
                 if "ネット販売" in title:
                     status_keyword = "予告・お知らせ"
 
-                items.append((title, link, img_url, status_keyword))
+                items.append((title, link, None, status_keyword))
 
     # 重複の排除
     unique_items = []
@@ -163,6 +147,37 @@ def extract_updates(soup):
 
     return unique_items
 
+def fetch_product_image(product_url):
+    """
+    【安全設計】商品ページへアクセスし、メイン画像を取得する関数。
+    実行回数を制限（最大5回）し、サーバーに負荷をかけないよう設定。
+    """
+    default_img = "https://upload.wikimedia.org/wikipedia/commons/thumb/a/ac/No_image_available.svg/300px-No_image_available.svg.png"
+    if not product_url:
+        return default_img
+    
+    try:
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        res = requests.get(product_url, headers=headers, timeout=5)
+        res.encoding = res.apparent_encoding
+        soup = BeautifulSoup(res.text, "html.parser")
+        
+        # 1. まず最も確実な og:image を探す
+        og_img = soup.find("meta", property="og:image")
+        if og_img and og_img.get("content"):
+            return og_img["content"].replace("http://", "https://")
+        
+        # 2. なければ shop-pro 共通の商品画像パターンを探す
+        for img in soup.find_all("img"):
+            src = img.get("src", "")
+            if "/product/" in src:
+                return urljoin(product_url, src).replace("http://", "https://")
+                
+    except Exception as e:
+        print(f"画像取得エラー ({product_url}): {e}")
+        
+    return default_img
+
 def create_flex_bubble(title, link, img_url, keyword):
     keyword_color = "#666666"
     if keyword == "新入荷！":
@@ -172,7 +187,6 @@ def create_flex_bubble(title, link, img_url, keyword):
     elif keyword in ["ご予約開始！", "店頭販売中！", "予告・お知らせ"]:
         keyword_color = "#FF69B4"
 
-    # ヒーロー画像セクション（リンクがある場合のみタップアクションを追加）
     hero_section = {
         "type": "image",
         "url": img_url,
@@ -180,6 +194,7 @@ def create_flex_bubble(title, link, img_url, keyword):
         "aspectRatio": "1:1",
         "aspectMode": "cover"
     }
+    # リンクがある場合のみ、画像をタップした際のアクションを追加
     if link:
         hero_section["action"] = {
             "type": "uri",
@@ -255,7 +270,7 @@ def main():
         return
 
     raw_items = extract_updates(soup)
-    all_current_items = [(generate_key(url, title), url, title) for title, url, img_url, keyword in raw_items]
+    all_current_items = [(generate_key(url, title), url, title) for title, url, _, keyword in raw_items]
 
     if is_first_run:
         mark_as_seen(all_current_items)
@@ -267,34 +282,36 @@ def main():
     seen_keys = set()
 
     if TEST_MODE:
-        # 【テストモード】既読無視で最新アイテムを抽出（DB更新もしない）
         print("★テストモード実行中: DBチェックをスキップして最新アイテムを取得します。")
-        for title, url, img_url, keyword in raw_items:
+        for title, url, _, keyword in raw_items:
             item_key = generate_key(url, title)
             if item_key not in seen_keys:
                 seen_keys.add(item_key)
-                new_items.append((item_key, title, url, img_url, keyword))
+                new_items.append((item_key, title, url, keyword))
     else:
-        # 【通常モード】未登録の新着差分のみをチェック
-        for title, url, img_url, keyword in raw_items:
+        for title, url, _, keyword in raw_items:
             item_key = generate_key(url, title)
             if item_key not in seen_keys and not is_seen(item_key):
                 seen_keys.add(item_key)
-                new_items.append((item_key, title, url, img_url, keyword))
+                new_items.append((item_key, title, url, keyword))
 
     if not new_items:
         print("「新入荷＆在庫更新情報」の新しい更新はありませんでした。")
         return
 
-    # 通常モードのみ、今回検知されたデータをDB登録（テストモード時は汚さない）
     if not TEST_MODE:
         mark_as_seen(all_current_items)
 
-    # 1回の送信上限ストッパー（最大5件）
     send_targets = new_items[:MAX_NOTIFY_LIMIT]
     
     bubbles = []
-    for item_key, title, link, img_url, keyword in send_targets:
+    for item_key, title, link, keyword in send_targets:
+        # ★ここで「送信対象の最大5件だけ」個別に商品ページへアクセスして画像を取得します
+        if link:
+            img_url = fetch_product_image(link)
+        else:
+            img_url = "https://upload.wikimedia.org/wikipedia/commons/thumb/a/ac/No_image_available.svg/300px-No_image_available.svg.png"
+            
         bubble = create_flex_bubble(title, link, img_url, keyword)
         bubbles.append(bubble)
 
@@ -303,9 +320,7 @@ def main():
         "contents": bubbles
     }
 
-    # ★安全対策: 送信前にプレフィックスを付ける
     prefix_text = "【テスト送信】" if TEST_MODE else "【新着・在庫更新情報】"
-    
     flex_message = FlexMessage(
         alt_text=f"{prefix_text}({len(send_targets)}件)",
         contents=FlexContainer.from_dict(flex_container_dict)
