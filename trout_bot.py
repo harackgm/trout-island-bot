@@ -12,18 +12,22 @@ from linebot.v3.messaging import (
     ApiClient,
     MessagingApi,
     BroadcastRequest,
-    TemplateMessage,
-    CarouselTemplate,
-    CarouselColumn,
-    URIAction
+    FlexMessage,
+    FlexContainer
 )
+
+# ==========================================
+# ★テストモード設定（True: 強制5件通知 / False: 通常動作）
+# デザイン確認が終わったら False に戻してください。
+# ==========================================
+TEST_MODE = True
+MAX_NOTIFY_LIMIT = 5
 
 CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN', '').strip()
 TARGET_URL = "https://troutisland.shop-pro.jp/"
 DB_FILE = "products.db"
 
 def init_db():
-    """DBを初期化し、テーブルが空（初回起動）かどうかを判定する"""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute('''
@@ -35,7 +39,6 @@ def init_db():
         )
     ''')
     conn.commit()
-    
     c.execute('SELECT COUNT(*) FROM seen_items')
     count = c.fetchone()[0]
     conn.close()
@@ -54,7 +57,6 @@ def is_seen(item_key):
     return row is not None
 
 def mark_as_seen(items):
-    """取得したアイテムをDBに登録して既読化"""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     for item_key, url, title in items:
@@ -71,8 +73,8 @@ def clean_text(text):
 
 def extract_updates(soup):
     items = []
-    
     target_blocks = []
+    
     for tag in soup.find_all(['td', 'div', 'p', 'table']):
         text = tag.get_text()
         if ('新入荷' in text or '在庫更新' in text) and not ('オススメ' in text or 'おすすめ' in text):
@@ -82,7 +84,10 @@ def extract_updates(soup):
         target_blocks = [soup]
 
     for block in target_blocks:
+        # 1. リンク（aタグ）がある通常商品の抽出
         a_tags = block.find_all('a', href=True)
+        extracted_texts = set()
+        
         for a in a_tags:
             href = clean_text(a['href'])
             text = clean_text(a.get_text())
@@ -95,16 +100,149 @@ def extract_updates(soup):
 
             if has_date and ('pid=' in href or 'shop-pro.jp' in href):
                 full_url = urljoin(TARGET_URL, href)
-                items.append((text, full_url))
+                
+                img_url = None
+                img_tag = a.find('img')
+                if not img_tag:
+                    parent = a.find_parent(['td', 'div', 'li'])
+                    if parent:
+                        img_tag = parent.find('img')
+                
+                if img_tag and img_tag.get('src'):
+                    raw_img_src = img_tag.get('src')
+                    img_url = urljoin(TARGET_URL, raw_img_src).replace("http://", "https://")
+                else:
+                    img_url = "https://via.placeholder.com/300x300.png?text=No+Image"
+                
+                status_keyword = "更新・お知らせ"
+                full_check_text = text + " " + parent_text
+                if "新入荷" in full_check_text:
+                    status_keyword = "新入荷！"
+                elif "再入荷" in full_check_text:
+                    status_keyword = "再入荷！"
+                elif "予約" in full_check_text:
+                    status_keyword = "ご予約開始！"
 
-    return items
+                extracted_texts.add(text)
+                items.append((text, full_url, img_url, status_keyword))
+
+        # 2. リンクなし（イレギュラー告知）の抽出
+        lines = block.get_text(separator='\n').split('\n')
+        for i, line in enumerate(lines):
+            clean_line = clean_text(line)
+            if not clean_line:
+                continue
+            
+            # 「店頭販売中」や「ネット販売」を含む行を検知
+            if "店頭販売中" in clean_line or "ネット販売" in clean_line:
+                # 既にリンクありとして抽出済みのテキストが含まれていれば除外
+                if any(ext_text in clean_line for ext_text in extracted_texts):
+                    continue
+                
+                # 「↑」などの記号があれば、前の行と結合して商品名にする
+                title = clean_line
+                if "↑" in clean_line and i > 0:
+                    title = clean_text(lines[i-1]) + " " + clean_line
+
+                # リンクなし用の設定
+                link = "" 
+                img_url = "https://via.placeholder.com/300x300.png?text=No+Image"
+                status_keyword = "店頭販売中！"
+                if "ネット販売" in title:
+                    status_keyword = "予告・お知らせ"
+
+                items.append((title, link, img_url, status_keyword))
+
+    # 重複の排除
+    unique_items = []
+    seen_titles = set()
+    for item in items:
+        if item[0] not in seen_titles:
+            unique_items.append(item)
+            seen_titles.add(item[0])
+
+    return unique_items
+
+def create_flex_bubble(title, link, img_url, keyword):
+    keyword_color = "#666666"
+    if keyword == "新入荷！":
+        keyword_color = "#FF4500"
+    elif keyword == "再入荷！":
+        keyword_color = "#32CD32"
+    elif keyword in ["ご予約開始！", "店頭販売中！", "予告・お知らせ"]:
+        keyword_color = "#FF69B4"
+
+    # ヒーロー画像セクション（リンクがある場合のみタップアクションを追加）
+    hero_section = {
+        "type": "image",
+        "url": img_url,
+        "size": "full",
+        "aspectRatio": "1:1",
+        "aspectMode": "cover"
+    }
+    if link:
+        hero_section["action"] = {
+            "type": "uri",
+            "uri": link
+        }
+
+    bubble = {
+        "type": "bubble",
+        "size": "micro",
+        "hero": hero_section,
+        "body": {
+            "type": "box",
+            "layout": "vertical",
+            "spacing": "sm",
+            "contents": [
+                {
+                    "type": "text",
+                    "text": keyword,
+                    "color": keyword_color,
+                    "size": "sm",
+                    "weight": "bold"
+                },
+                {
+                    "type": "text",
+                    "text": title,
+                    "wrap": True,
+                    "weight": "bold",
+                    "size": "sm",
+                    "maxLines": 3
+                }
+            ]
+        }
+    }
+
+    # リンクがある場合のみ「詳細を見る」ボタンを追加
+    if link:
+        bubble["footer"] = {
+            "type": "box",
+            "layout": "vertical",
+            "spacing": "sm",
+            "contents": [
+                {
+                    "type": "button",
+                    "style": "primary",
+                    "color": "#00BFFF", # 水色
+                    "height": "sm",
+                    "action": {
+                        "type": "uri",
+                        "label": "詳細を見る",
+                        "uri": link
+                    }
+                }
+            ],
+            "flex": 0
+        }
+
+    return bubble
 
 def main():
     if not CHANNEL_ACCESS_TOKEN:
         print("エラー: Secrets LINE_CHANNEL_ACCESS_TOKEN が設定されていません。")
         return
 
-    # 初回起動（DBにデータが一切ない状態）かどうか判定
     is_first_run = init_db()
 
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
@@ -117,61 +255,60 @@ def main():
         return
 
     raw_items = extract_updates(soup)
-    
-    # サイト上の全アイテム情報を整理
-    all_current_items = []
-    for title, url in raw_items:
-        item_key = generate_key(url, title)
-        all_current_items.append((item_key, url, title))
+    all_current_items = [(generate_key(url, title), url, title) for title, url, img_url, keyword in raw_items]
 
-    # 【初回起動時】通知せず、すべてDB登録（初回セットアップ）して終了
     if is_first_run:
         mark_as_seen(all_current_items)
-        print(f"★初回セットアップ完了: 過去データ {len(all_current_items)}件をすべてDB登録しました（通知は送信されません）。")
-        return
+        print(f"★初回セットアップ完了: 過去データ {len(all_current_items)}件をDB登録しました。")
+        if not TEST_MODE:
+            return
 
-    # 【通常実行時】未登録の新着差分のみをチェック
     new_items = []
     seen_keys = set()
-    
-    for title, url in raw_items:
-        item_key = generate_key(url, title)
-        if item_key not in seen_keys and not is_seen(item_key):
-            seen_keys.add(item_key)
-            new_items.append((item_key, title, url))
+
+    if TEST_MODE:
+        # 【テストモード】既読無視で最新アイテムを抽出（DB更新もしない）
+        print("★テストモード実行中: DBチェックをスキップして最新アイテムを取得します。")
+        for title, url, img_url, keyword in raw_items:
+            item_key = generate_key(url, title)
+            if item_key not in seen_keys:
+                seen_keys.add(item_key)
+                new_items.append((item_key, title, url, img_url, keyword))
+    else:
+        # 【通常モード】未登録の新着差分のみをチェック
+        for title, url, img_url, keyword in raw_items:
+            item_key = generate_key(url, title)
+            if item_key not in seen_keys and not is_seen(item_key):
+                seen_keys.add(item_key)
+                new_items.append((item_key, title, url, img_url, keyword))
 
     if not new_items:
         print("「新入荷＆在庫更新情報」の新しい更新はありませんでした。")
         return
 
-    # 送信前に今回検知されたデータを全件DB登録
-    mark_as_seen(all_current_items)
+    # 通常モードのみ、今回検知されたデータをDB登録（テストモード時は汚さない）
+    if not TEST_MODE:
+        mark_as_seen(all_current_items)
 
-    # 1回の送信上限（最大5件に制限し、大量送信をストップ）
-    send_targets = new_items[:5]
+    # 1回の送信上限ストッパー（最大5件）
+    send_targets = new_items[:MAX_NOTIFY_LIMIT]
     
-    # --- カルーセルメッセージの作成 ---
-    columns = []
-    for item_key, title, link in send_targets:
-        # LINE API仕様: titleは最大40文字
-        display_title = title if len(title) <= 40 else title[:37] + "..."
-        
-        col = CarouselColumn(
-            title=display_title,
-            text="商品の詳細はリンク先でご確認ください。",
-            actions=[
-                URIAction(
-                    label="商品ページへ",
-                    uri=link
-                )
-            ]
-        )
-        columns.append(col)
+    bubbles = []
+    for item_key, title, link, img_url, keyword in send_targets:
+        bubble = create_flex_bubble(title, link, img_url, keyword)
+        bubbles.append(bubble)
 
-    carousel_template = CarouselTemplate(columns=columns)
-    template_message = TemplateMessage(
-        alt_text=f"【新着・在庫更新情報】({len(send_targets)}件)",
-        template=carousel_template
+    flex_container_dict = {
+        "type": "carousel",
+        "contents": bubbles
+    }
+
+    # ★安全対策: 送信前にプレフィックスを付ける
+    prefix_text = "【テスト送信】" if TEST_MODE else "【新着・在庫更新情報】"
+    
+    flex_message = FlexMessage(
+        alt_text=f"{prefix_text}({len(send_targets)}件)",
+        contents=FlexContainer.from_dict(flex_container_dict)
     )
 
     configuration = Configuration(access_token=CHANNEL_ACCESS_TOKEN)
@@ -179,10 +316,10 @@ def main():
     try:
         with ApiClient(configuration) as api_client:
             line_bot_api = MessagingApi(api_client)
-            broadcast_request = BroadcastRequest(messages=[template_message])
+            broadcast_request = BroadcastRequest(messages=[flex_message])
             line_bot_api.broadcast(broadcast_request)
         
-        print(f"★全登録者へ新着・在庫更新 {len(send_targets)}件をカルーセル形式で正常送信しました。")
+        print(f"★全登録者へ {len(send_targets)}件をFlex Message形式で正常送信しました。")
     except Exception as e:
         print(f"★送信エラー: {e}")
 
