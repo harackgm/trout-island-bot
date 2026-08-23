@@ -18,11 +18,12 @@ from linebot.v3.messaging import (
 )
 
 # ==========================================
-# ★テストモード設定（True: 強制5件通知 / False: 通常動作）
+# ★テストモード設定（True: 強制通知 / False: 通常動作）
 # イレギュラーパターンの抽出テスト用
 # ==========================================
 TEST_MODE = True
-MAX_NOTIFY_LIMIT = 5
+# テスト漏れを防ぐため一時的にLINE上限の10件に変更
+MAX_NOTIFY_LIMIT = 10 if TEST_MODE else 5
 
 CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN', '').strip()
 TARGET_URL = "https://troutisland.shop-pro.jp/"
@@ -76,9 +77,12 @@ def extract_updates(soup):
     items = []
     target_blocks = []
     
+    # ★修正箇所1: 監視対象とするエリアの条件キーワードを拡張
+    target_keywords = ['新入荷', '在庫更新', '特価コーナー', '店頭販売中', 'ネット販売']
+    
     for tag in soup.find_all(['td', 'div', 'p', 'table']):
         text = tag.get_text()
-        if ('新入荷' in text or '在庫更新' in text) and not ('オススメ' in text or 'おすすめ' in text):
+        if any(kw in text for kw in target_keywords) and not ('オススメ' in text or 'おすすめ' in text):
             target_blocks.append(tag)
 
     if not target_blocks:
@@ -111,7 +115,10 @@ def extract_updates(soup):
                 elif "予約" in full_check_text:
                     status_keyword = "ご予約開始！"
 
-                extracted_texts.add(text)
+                # 文字が短すぎると誤検知でリンクなし告知を消してしまうため、ある程度長い場合のみ記録
+                if len(text) > 4:
+                    extracted_texts.add(text)
+                
                 items.append((text, full_url, status_keyword))
 
         # 2. リンクなし（イレギュラー告知）の抽出
@@ -121,7 +128,7 @@ def extract_updates(soup):
             if not clean_line:
                 continue
             
-            # ★「特価コーナー」「店頭販売中」「ネット販売」を含む行を検知
+            # 「特価コーナー」「店頭販売中」「ネット販売」を含む行を検知
             if "店頭販売中" in clean_line or "ネット販売" in clean_line or "特価コーナー" in clean_line:
                 # 既にリンクありとして抽出済みの場合はスキップ
                 if any(ext_text in clean_line for ext_text in extracted_texts):
@@ -135,7 +142,6 @@ def extract_updates(soup):
                 link = "" 
                 status_keyword = "お知らせ"
                 
-                # キーワード判定
                 if "特価コーナー" in title:
                     status_keyword = "特価コーナー！"
                 elif "ネット販売" in title:
@@ -187,7 +193,7 @@ def create_flex_bubble(title, link, img_url, keyword):
     elif keyword == "再入荷！":
         keyword_color = "#32CD32"
     elif keyword == "特価コーナー！":
-        keyword_color = "#FF0000" # 特価コーナーは赤色
+        keyword_color = "#FF0000" # 赤色
     elif keyword in ["ご予約開始！", "店頭販売中！", "予告・お知らせ"]:
         keyword_color = "#FF69B4"
 
