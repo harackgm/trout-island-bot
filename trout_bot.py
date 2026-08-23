@@ -19,10 +19,9 @@ from linebot.v3.messaging import (
 
 # ==========================================
 # ★テストモード設定（True: 強制通知 / False: 通常動作）
-# 特価コーナーの商品自動検知テスト
+# 特価コーナー優先表示テスト
 # ==========================================
 TEST_MODE = True
-# 枠に埋もれないようテスト時のみ上限を10件に拡張
 MAX_NOTIFY_LIMIT = 10 if TEST_MODE else 5
 
 CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN', '').strip()
@@ -124,7 +123,6 @@ def extract_updates(soup):
             if not clean_line:
                 continue
             
-            # ※特価コーナーは専用アクセス処理で行うため、ここでは「店頭・ネット販売」のみ検知
             if "店頭販売中" in clean_line or "ネット販売" in clean_line:
                 if any(ext_text in clean_line for ext_text in extracted_texts):
                     continue
@@ -161,7 +159,6 @@ def extract_sale_items():
         soup = BeautifulSoup(res.text, "html.parser")
         
         products = {}
-        # 商品リンク（pidが含まれるaタグ）を探す
         for a in soup.find_all('a', href=True):
             href = clean_text(a['href'])
             if 'pid=' in href:
@@ -171,7 +168,6 @@ def extract_sale_items():
                     if pid not in products:
                         products[pid] = {"title": "", "img_url": None}
                     
-                    # 画像タグとテキストタグが分かれているカラーミーの仕様に対応
                     text = clean_text(a.get_text())
                     if len(text) > len(products[pid]["title"]):
                         products[pid]["title"] = text
@@ -184,11 +180,9 @@ def extract_sale_items():
                         safe_path = urllib.parse.quote(parsed.path)
                         products[pid]["img_url"] = urllib.parse.urlunparse((parsed.scheme, parsed.netloc, safe_path, parsed.params, parsed.query, parsed.fragment))
 
-        # 抽出した商品をリストにまとめる
         for pid, data in products.items():
             title = data["title"] if data["title"] else f"特価アイテム (ID:{pid})"
             img_url = data["img_url"]
-            # リンク先はご指定通り特価のルート(SALE_URL)固定
             items.append((title, SALE_URL, img_url, "特価コーナー！"))
             
     except Exception as e:
@@ -315,11 +309,13 @@ def main():
     # 通常商品の抽出
     raw_items = extract_updates(soup)
     
-    # ★スマート検知: トップページに「特価コーナー」の文字があれば、特価ページをスクレイピング
-    if "特価コーナー" in soup.get_text():
+    # ★スマート検知: 見落とし防止のため「特価」で判定
+    clean_site_text = clean_text(soup.get_text())
+    if "特価" in clean_site_text:
         print("★特価コーナー表示を検知しました。特価商品をチェックします。")
         sale_items = extract_sale_items()
-        raw_items.extend(sale_items) # 通常商品と特価商品を合体させる
+        # ★優先度アップ: 特価商品をリストの「先頭」に追加して押し出しを防止
+        raw_items = sale_items + raw_items 
 
     all_current_items = [(generate_key(url, title), url, title) for title, url, img_url, keyword in raw_items]
 
@@ -357,7 +353,6 @@ def main():
     
     bubbles = []
     for item_key, title, link, pre_img_url, keyword in send_targets:
-        # 特価コーナーですでに画像取得済みの場合はフェッチ処理をスキップ（サーバー負荷軽減）
         img_url = pre_img_url
         if not img_url and link:
             img_url = fetch_product_image(link)
