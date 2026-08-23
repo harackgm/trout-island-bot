@@ -3,6 +3,7 @@ import sqlite3
 import requests
 import re
 import hashlib
+import urllib.parse
 from urllib.parse import urljoin
 from bs4 import BeautifulSoup
 
@@ -18,7 +19,7 @@ from linebot.v3.messaging import (
 
 # ==========================================
 # ★テストモード設定（True: 強制5件通知 / False: 通常動作）
-# デザイン・画像の確認が終わったら False に戻してください。
+# サイズ確認用にもう一度 True にしています。確認後 False に戻してください。
 # ==========================================
 TEST_MODE = True
 MAX_NOTIFY_LIMIT = 5
@@ -84,7 +85,6 @@ def extract_updates(soup):
         target_blocks = [soup]
 
     for block in target_blocks:
-        # 1. リンク（aタグ）がある通常商品の抽出
         a_tags = block.find_all('a', href=True)
         extracted_texts = set()
         
@@ -111,17 +111,14 @@ def extract_updates(soup):
                     status_keyword = "ご予約開始！"
 
                 extracted_texts.add(text)
-                # 画像URLは後で個別取得するため、ここでは None を入れておく
-                items.append((text, full_url, None, status_keyword))
+                items.append((text, full_url, status_keyword))
 
-        # 2. リンクなし（イレギュラー告知）の抽出
         lines = block.get_text(separator='\n').split('\n')
         for i, line in enumerate(lines):
             clean_line = clean_text(line)
             if not clean_line:
                 continue
             
-            # 「店頭販売中」や「ネット販売」を含む行を検知
             if "店頭販売中" in clean_line or "ネット販売" in clean_line:
                 if any(ext_text in clean_line for ext_text in extracted_texts):
                     continue
@@ -135,9 +132,8 @@ def extract_updates(soup):
                 if "ネット販売" in title:
                     status_keyword = "予告・お知らせ"
 
-                items.append((title, link, None, status_keyword))
+                items.append((title, link, status_keyword))
 
-    # 重複の排除
     unique_items = []
     seen_titles = set()
     for item in items:
@@ -148,35 +144,29 @@ def extract_updates(soup):
     return unique_items
 
 def fetch_product_image(product_url):
-    """
-    【安全設計】商品ページへアクセスし、メイン画像を取得する関数。
-    実行回数を制限（最大5回）し、サーバーに負荷をかけないよう設定。
-    """
-    default_img = "https://upload.wikimedia.org/wikipedia/commons/thumb/a/ac/No_image_available.svg/300px-No_image_available.svg.png"
     if not product_url:
-        return default_img
-    
+        return None
     try:
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
         res = requests.get(product_url, headers=headers, timeout=5)
         res.encoding = res.apparent_encoding
         soup = BeautifulSoup(res.text, "html.parser")
         
-        # 1. まず最も確実な og:image を探す
         og_img = soup.find("meta", property="og:image")
         if og_img and og_img.get("content"):
-            return og_img["content"].replace("http://", "https://")
-        
-        # 2. なければ shop-pro 共通の商品画像パターンを探す
-        for img in soup.find_all("img"):
-            src = img.get("src", "")
-            if "/product/" in src:
-                return urljoin(product_url, src).replace("http://", "https://")
-                
+            img_url = og_img["content"]
+            if img_url.startswith("//"):
+                img_url = "https:" + img_url
+            elif img_url.startswith("http://"):
+                img_url = img_url.replace("http://", "https://")
+            
+            parsed = urllib.parse.urlparse(img_url)
+            safe_path = urllib.parse.quote(parsed.path)
+            img_url = urllib.parse.urlunparse((parsed.scheme, parsed.netloc, safe_path, parsed.params, parsed.query, parsed.fragment))
+            return img_url
     except Exception as e:
         print(f"画像取得エラー ({product_url}): {e}")
-        
-    return default_img
+    return None
 
 def create_flex_bubble(title, link, img_url, keyword):
     keyword_color = "#666666"
@@ -187,24 +177,9 @@ def create_flex_bubble(title, link, img_url, keyword):
     elif keyword in ["ご予約開始！", "店頭販売中！", "予告・お知らせ"]:
         keyword_color = "#FF69B4"
 
-    hero_section = {
-        "type": "image",
-        "url": img_url,
-        "size": "full",
-        "aspectRatio": "1:1",
-        "aspectMode": "cover"
-    }
-    # リンクがある場合のみ、画像をタップした際のアクションを追加
-    if link:
-        hero_section["action"] = {
-            "type": "uri",
-            "uri": link
-        }
-
     bubble = {
         "type": "bubble",
-        "size": "micro",
-        "hero": hero_section,
+        "size": "kilo", # ★ここを micro から kilo（標準幅）に変更しました
         "body": {
             "type": "box",
             "layout": "vertical",
@@ -229,7 +204,21 @@ def create_flex_bubble(title, link, img_url, keyword):
         }
     }
 
-    # リンクがある場合のみ「詳細を見る」ボタンを追加
+    if img_url:
+        hero_section = {
+            "type": "image",
+            "url": img_url,
+            "size": "full",
+            "aspectRatio": "1:1",
+            "aspectMode": "cover"
+        }
+        if link:
+            hero_section["action"] = {
+                "type": "uri",
+                "uri": link
+            }
+        bubble["hero"] = hero_section
+
     if link:
         bubble["footer"] = {
             "type": "box",
@@ -239,7 +228,7 @@ def create_flex_bubble(title, link, img_url, keyword):
                 {
                     "type": "button",
                     "style": "primary",
-                    "color": "#00BFFF", # 水色
+                    "color": "#00BFFF",
                     "height": "sm",
                     "action": {
                         "type": "uri",
@@ -270,7 +259,7 @@ def main():
         return
 
     raw_items = extract_updates(soup)
-    all_current_items = [(generate_key(url, title), url, title) for title, url, _, keyword in raw_items]
+    all_current_items = [(generate_key(url, title), url, title) for title, url, keyword in raw_items]
 
     if is_first_run:
         mark_as_seen(all_current_items)
@@ -283,13 +272,13 @@ def main():
 
     if TEST_MODE:
         print("★テストモード実行中: DBチェックをスキップして最新アイテムを取得します。")
-        for title, url, _, keyword in raw_items:
+        for title, url, keyword in raw_items:
             item_key = generate_key(url, title)
             if item_key not in seen_keys:
                 seen_keys.add(item_key)
                 new_items.append((item_key, title, url, keyword))
     else:
-        for title, url, _, keyword in raw_items:
+        for title, url, keyword in raw_items:
             item_key = generate_key(url, title)
             if item_key not in seen_keys and not is_seen(item_key):
                 seen_keys.add(item_key)
@@ -306,12 +295,7 @@ def main():
     
     bubbles = []
     for item_key, title, link, keyword in send_targets:
-        # ★ここで「送信対象の最大5件だけ」個別に商品ページへアクセスして画像を取得します
-        if link:
-            img_url = fetch_product_image(link)
-        else:
-            img_url = "https://upload.wikimedia.org/wikipedia/commons/thumb/a/ac/No_image_available.svg/300px-No_image_available.svg.png"
-            
+        img_url = fetch_product_image(link) if link else None
         bubble = create_flex_bubble(title, link, img_url, keyword)
         bubbles.append(bubble)
 
