@@ -15,7 +15,7 @@ from linebot.v3.messaging import (
     FlexMessage,
     FlexContainer
 )
-from linebot.v3.exceptions import ApiException
+from linebot.v3.exceptions import LineBotApiError
 
 CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN', '').strip()
 USER_ID = os.environ.get('LINE_USER_ID', '').strip()
@@ -198,7 +198,7 @@ def main():
         return
 
     if not USER_ID:
-        print("エラー: Secrets LINE_USER_ID が設定されていません。特定ユーザーへのプッシュ送信ができません。")
+        print("エラー: Secrets LINE_USER_ID が設定されていません。")
         return
 
     is_first_run = init_db()
@@ -237,7 +237,6 @@ def main():
         print("「新入荷＆在庫更新情報」の新しい更新はありませんでした。")
         return
 
-    # 1回の送信件数を最大3件に制限
     send_targets = new_items[:3]
     bubbles = []
 
@@ -263,10 +262,9 @@ def main():
             line_bot_api.push_message(push_request)
         
         mark_as_seen([(item_key, url, title) for item_key, title, url in send_targets])
-        print(f"★管理ユーザー宛てに新着・在庫更新 {len(send_targets)}件のテスト通知（decaサイズ）を送信しました。")
-    except ApiException as e:
-        print(f"★LINE API エラー詳細: {e.status} {e.reason}")
-        print(f"★エラーレスポンス内容: {e.body}")
+        print(f"★管理ユーザー宛てに新着・在庫更新 {len(send_targets)}件のテスト通知を送信しました。")
+    except LineBotApiError as e:
+        print(f"★LINE API エラー詳細: status_code={e.status_code}, error={e.error}")
     except Exception as e:
         print(f"★送信エラー: {e}")
 
