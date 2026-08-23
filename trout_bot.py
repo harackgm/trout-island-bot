@@ -3,7 +3,7 @@ import sqlite3
 import requests
 import re
 import hashlib
-from urllib.parse import urljoin, quote
+from urllib.parse import urljoin
 from bs4 import BeautifulSoup
 
 # LINE Messaging API v3
@@ -11,21 +11,19 @@ from linebot.v3.messaging import (
     Configuration,
     ApiClient,
     MessagingApi,
-    PushMessageRequest,
-    FlexMessage,
-    FlexContainer
+    BroadcastRequest,
+    TemplateMessage,
+    CarouselTemplate,
+    CarouselColumn,
+    URIAction
 )
-from linebot.v3.messaging.rest import ApiException
 
 CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN', '').strip()
-USER_ID = os.environ.get('LINE_USER_ID', '').strip()
 TARGET_URL = "https://troutisland.shop-pro.jp/"
 DB_FILE = "products.db"
 
-# デフォルト画像
-DEFAULT_IMG = "https://raw.githubusercontent.com/line/line-images/master/blogs/20200806/logo.png"
-
 def init_db():
+    """DBを初期化し、テーブルが空（初回起動）かどうかを判定する"""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute('''
@@ -43,8 +41,8 @@ def init_db():
     conn.close()
     return count == 0
 
-def generate_key(date_str, title, url):
-    raw_str = f"{date_str}_{title}_{url}"
+def generate_key(url, title):
+    raw_str = f"{url}_{title}"
     return hashlib.md5(raw_str.encode('utf-8')).hexdigest()
 
 def is_seen(item_key):
@@ -56,6 +54,7 @@ def is_seen(item_key):
     return row is not None
 
 def mark_as_seen(items):
+    """取得したアイテムをDBに登録して既読化"""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     for item_key, url, title in items:
@@ -70,97 +69,13 @@ def clean_text(text):
     text = re.sub(r'\s+', ' ', text)
     return text.strip()
 
-def fetch_product_image(product_url, headers):
-    try:
-        res = requests.get(product_url, headers=headers, timeout=5)
-        res.encoding = res.apparent_encoding
-        p_soup = BeautifulSoup(res.text, "html.parser")
-        
-        img_src = None
-        og_img = p_soup.find("meta", property="og:image")
-        if og_img and og_img.get("content"):
-            img_src = og_img.get("content")
-        else:
-            img_tag = p_soup.find("img", id="product_image") or p_soup.find("img", class_="product_image")
-            if img_tag and img_tag.get("src"):
-                img_src = img_tag.get("src")
-        
-        if img_src:
-            if img_src.startswith("//"):
-                img_src = "https:" + img_src
-            elif img_src.startswith("http://"):
-                img_src = img_src.replace("http://", "https://", 1)
-            elif not img_src.startswith("http"):
-                img_src = urljoin(product_url, img_src)
-            
-            return f"https://images.weserv.nl/?url={quote(img_src)}&default={quote(DEFAULT_IMG)}"
-            
-    except Exception as e:
-        print(f"画像取得スキップ ({product_url}): {e}")
-    
-    return DEFAULT_IMG
-
-def create_bubble(title, link, img_url):
-    safe_title = title if len(title) <= 60 else title[:57] + "..."
-    
-    # LINE公式で保証されている標準仕様のBubble構造
-    return {
-        "type": "bubble",
-        "size": "kilo",  # 標準サイズのkiloに変更
-        "hero": {
-            "type": "image",
-            "url": img_url,
-            "size": "full",
-            "aspectRatio": "20:13",
-            "aspectMode": "cover"
-        },
-        "body": {
-            "type": "box",
-            "layout": "vertical",
-            "contents": [
-                {
-                    "type": "text",
-                    "text": "【新着・更新】",
-                    "weight": "bold",
-                    "color": "#1DB446",
-                    "size": "sm"
-                },
-                {
-                    "type": "text",
-                    "text": safe_title,
-                    "weight": "bold",
-                    "size": "sm",
-                    "wrap": True,
-                    "margin": "xs"
-                }
-            ]
-        },
-        "footer": {
-            "type": "box",
-            "layout": "vertical",
-            "contents": [
-                {
-                    "type": "button",
-                    "style": "primary",
-                    "color": "#1DB446",
-                    "height": "sm",
-                    "action": {
-                        "type": "uri",
-                        "label": "詳細",
-                        "uri": link
-                    }
-                }
-            ]
-        }
-    }
-
 def extract_updates(soup):
     items = []
     
     target_blocks = []
     for tag in soup.find_all(['td', 'div', 'p', 'table']):
         text = tag.get_text()
-        if ('新入荷' in text or '在庫更新' in text or '再入荷' in text or '新色' in text or '更新！' in text) and not ('オススメ' in text or 'おすすめ' in text):
+        if ('新入荷' in text or '在庫更新' in text) and not ('オススメ' in text or 'おすすめ' in text):
             target_blocks.append(tag)
 
     if not target_blocks:
@@ -175,21 +90,12 @@ def extract_updates(soup):
             if not href or 'mode=cate' in href or 'cart' in href or 'myaccount' in href or href in ['/', '#']:
                 continue
 
-            date_match = re.search(r'(\d{1,2}/\d{1,2})', text)
-            if not date_match:
-                prev = a.previous_sibling
-                if prev and isinstance(prev, str):
-                    date_match = re.search(r'(\d{1,2}/\d{1,2})', prev)
+            parent_text = clean_text(a.parent.get_text()) if a.parent else ""
+            has_date = bool(re.search(r'\d{1,2}/\d{1,2}', text) or re.search(r'\d{1,2}/\d{1,2}', parent_text))
 
-            date_str = date_match.group(1) if date_match else "NODATE"
-
-            if ('pid=' in href or 'shop-pro.jp' in href or 'mode=' in href):
-                clean_title = text
-                if date_str != "NODATE" and date_str not in clean_title:
-                    clean_title = f"[{date_str}] {clean_title}"
-                
+            if has_date and ('pid=' in href or 'shop-pro.jp' in href):
                 full_url = urljoin(TARGET_URL, href)
-                items.append((date_str, clean_title, full_url))
+                items.append((text, full_url))
 
     return items
 
@@ -198,10 +104,7 @@ def main():
         print("エラー: Secrets LINE_CHANNEL_ACCESS_TOKEN が設定されていません。")
         return
 
-    if not USER_ID:
-        print("エラー: Secrets LINE_USER_ID が設定されていません。")
-        return
-
+    # 初回起動（DBにデータが一切ない状態）かどうか判定
     is_first_run = init_db()
 
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
@@ -215,21 +118,24 @@ def main():
 
     raw_items = extract_updates(soup)
     
+    # サイト上の全アイテム情報を整理
+    all_current_items = []
+    for title, url in raw_items:
+        item_key = generate_key(url, title)
+        all_current_items.append((item_key, url, title))
+
+    # 【初回起動時】通知せず、すべてDB登録（初回セットアップ）して終了
     if is_first_run:
-        all_to_mark = []
-        for date_str, title, url in raw_items:
-            item_key = generate_key(date_str, title, url)
-            all_to_mark.append((item_key, url, title))
-        
-        mark_as_seen(all_to_mark)
-        print(f"★初回セットアップ完了: 過去のデータ {len(all_to_mark)}件をDBに登録しました（通知は送信しません）。")
+        mark_as_seen(all_current_items)
+        print(f"★初回セットアップ完了: 過去データ {len(all_current_items)}件をすべてDB登録しました（通知は送信されません）。")
         return
 
+    # 【通常実行時】未登録の新着差分のみをチェック
     new_items = []
     seen_keys = set()
     
-    for date_str, title, url in raw_items:
-        item_key = generate_key(date_str, title, url)
+    for title, url in raw_items:
+        item_key = generate_key(url, title)
         if item_key not in seen_keys and not is_seen(item_key):
             seen_keys.add(item_key)
             new_items.append((item_key, title, url))
@@ -238,35 +144,45 @@ def main():
         print("「新入荷＆在庫更新情報」の新しい更新はありませんでした。")
         return
 
-    send_targets = new_items[:3]
-    bubbles = []
+    # 送信前に今回検知されたデータを全件DB登録
+    mark_as_seen(all_current_items)
 
+    # 1回の送信上限（最大5件に制限し、大量送信をストップ）
+    send_targets = new_items[:5]
+    
+    # --- カルーセルメッセージの作成 ---
+    columns = []
     for item_key, title, link in send_targets:
-        img_url = fetch_product_image(link, headers)
-        bubble_json = create_bubble(title, link, img_url)
-        bubbles.append(bubble_json)
+        # LINE API仕様: titleは最大40文字
+        display_title = title if len(title) <= 40 else title[:37] + "..."
+        
+        col = CarouselColumn(
+            title=display_title,
+            text="商品の詳細はリンク先でご確認ください。",
+            actions=[
+                URIAction(
+                    label="商品ページへ",
+                    uri=link
+                )
+            ]
+        )
+        columns.append(col)
 
-    carousel_json = {
-        "type": "carousel",
-        "contents": bubbles
-    }
-
-    flex_container = FlexContainer.from_dict(carousel_json)
-    flex_msg = FlexMessage(alt_text=f"新着・在庫更新情報 ({len(send_targets)}件)", contents=flex_container)
+    carousel_template = CarouselTemplate(columns=columns)
+    template_message = TemplateMessage(
+        alt_text=f"【新着・在庫更新情報】({len(send_targets)}件)",
+        template=carousel_template
+    )
 
     configuration = Configuration(access_token=CHANNEL_ACCESS_TOKEN)
 
     try:
         with ApiClient(configuration) as api_client:
             line_bot_api = MessagingApi(api_client)
-            push_request = PushMessageRequest(to=USER_ID, messages=[flex_msg])
-            line_bot_api.push_message(push_request)
+            broadcast_request = BroadcastRequest(messages=[template_message])
+            line_bot_api.broadcast(broadcast_request)
         
-        mark_as_seen([(item_key, url, title) for item_key, title, url in send_targets])
-        print(f"★管理ユーザー宛てに新着・在庫更新 {len(send_targets)}件のテスト通知を送信しました。")
-    except ApiException as e:
-        print(f"★LINE API エラー詳細: status={e.status}, reason={e.reason}")
-        print(f"★エラーボディ: {e.body}")
+        print(f"★全登録者へ新着・在庫更新 {len(send_targets)}件をカルーセル形式で正常送信しました。")
     except Exception as e:
         print(f"★送信エラー: {e}")
 
