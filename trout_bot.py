@@ -11,12 +11,13 @@ from linebot.v3.messaging import (
     Configuration,
     ApiClient,
     MessagingApi,
-    BroadcastRequest,
+    PushMessageRequest,
     FlexMessage,
     FlexContainer
 )
 
 CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN', '').strip()
+USER_ID = os.environ.get('LINE_USER_ID', '').strip()
 TARGET_URL = "https://troutisland.shop-pro.jp/"
 DB_FILE = "products.db"
 
@@ -24,7 +25,6 @@ DB_FILE = "products.db"
 DEFAULT_IMG = "https://raw.githubusercontent.com/line/line-images/master/blogs/20200806/logo.png"
 
 def init_db():
-    """DBを初期化し、テーブルが空（初回起動）かどうかを判定する"""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute('''
@@ -43,7 +43,6 @@ def init_db():
     return count == 0
 
 def generate_key(date_str, title, url):
-    """日付・タイトル・URLを組み合わせて識別キーを作成"""
     raw_str = f"{date_str}_{title}_{url}"
     return hashlib.md5(raw_str.encode('utf-8')).hexdigest()
 
@@ -56,7 +55,6 @@ def is_seen(item_key):
     return row is not None
 
 def mark_as_seen(items):
-    """取得したアイテムを確実にDBに登録して既読化"""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     for item_key, url, title in items:
@@ -72,7 +70,6 @@ def clean_text(text):
     return text.strip()
 
 def fetch_product_image(product_url, headers):
-    """商品個別ページから画像を取得し、プロキシURLを生成"""
     try:
         res = requests.get(product_url, headers=headers, timeout=5)
         res.encoding = res.apparent_encoding
@@ -107,7 +104,7 @@ def create_bubble(title, link, img_url):
     
     return {
         "type": "bubble",
-        "size": "micro",
+        "size": "small",  # micro から small に拡大
         "hero": {
             "type": "image",
             "url": img_url,
@@ -124,13 +121,13 @@ def create_bubble(title, link, img_url):
                     "text": "【新着・更新】",
                     "weight": "bold",
                     "color": "#1DB446",
-                    "size": "xs"
+                    "size": "sm"
                 },
                 {
                     "type": "text",
                     "text": safe_title,
                     "weight": "bold",
-                    "size": "xs",
+                    "size": "sm",
                     "wrap": True,
                     "margin": "xs"
                 }
@@ -156,7 +153,7 @@ def create_bubble(title, link, img_url):
     }
 
 def extract_updates(soup):
-    """HPから日付、タイトル、リンクを抽出"""
+    """厳密に日付とリンクを紐付けて抽出"""
     items = []
     
     target_blocks = []
@@ -177,19 +174,34 @@ def extract_updates(soup):
             if not href or 'mode=cate' in href or 'cart' in href or 'myaccount' in href or href in ['/', '#']:
                 continue
 
-            parent_text = clean_text(a.parent.get_text()) if a.parent else ""
-            date_match = re.search(r'(\d{1,2}/\d{1,2})', text) or re.search(r'(\d{1,2}/\d{1,2})', parent_text)
+            # 1. リンク自身のテキストから日付を探す
+            date_match = re.search(r'(\d{1,2}/\d{1,2})', text)
+            
+            # 2. リンク自体に日付が無い場合、直前の文字列から探す
+            if not date_match:
+                prev = a.previous_sibling
+                if prev and isinstance(prev, str):
+                    date_match = re.search(r'(\d{1,2}/\d{1,2})', prev)
+
             date_str = date_match.group(1) if date_match else "NODATE"
 
-            if (date_match or '更新' in text or '入荷' in text) and ('pid=' in href or 'shop-pro.jp' in href or 'mode=' in href):
+            if ('pid=' in href or 'shop-pro.jp' in href or 'mode=' in href):
+                clean_title = text
+                if date_str != "NODATE" and date_str not in clean_title:
+                    clean_title = f"[{date_str}] {clean_title}"
+                
                 full_url = urljoin(TARGET_URL, href)
-                items.append((date_str, text, full_url))
+                items.append((date_str, clean_title, full_url))
 
     return items
 
 def main():
     if not CHANNEL_ACCESS_TOKEN:
         print("エラー: Secrets LINE_CHANNEL_ACCESS_TOKEN が設定されていません。")
+        return
+
+    if not USER_ID:
+        print("エラー: Secrets LINE_USER_ID が設定されていません。特定ユーザーへのプッシュ送信ができません。")
         return
 
     is_first_run = init_db()
@@ -205,19 +217,16 @@ def main():
 
     raw_items = extract_updates(soup)
     
-    # 1. 初回起動時の処理（DBへ全登録して即終了）
     if is_first_run:
         all_to_mark = []
         for date_str, title, url in raw_items:
-            display_title = f"[{date_str}] {title}" if date_str != "NODATE" else title
             item_key = generate_key(date_str, title, url)
-            all_to_mark.append((item_key, url, display_title))
+            all_to_mark.append((item_key, url, title))
         
         mark_as_seen(all_to_mark)
         print(f"★初回セットアップ完了: 過去のデータ {len(all_to_mark)}件をDBに登録しました（通知は送信しません）。")
         return
 
-    # 2. 2回目以降の差分チェック
     new_items = []
     seen_keys = set()
     
@@ -225,15 +234,14 @@ def main():
         item_key = generate_key(date_str, title, url)
         if item_key not in seen_keys and not is_seen(item_key):
             seen_keys.add(item_key)
-            display_title = f"[{date_str}] {title}" if date_str != "NODATE" else title
-            new_items.append((item_key, display_title, url))
+            new_items.append((item_key, title, url))
 
     if not new_items:
         print("「新入荷＆在庫更新情報」の新しい更新はありませんでした。")
         return
 
-    # 最新最大7件を送信
-    send_targets = new_items[:7]
+    # 一回の送信件数を最大3件に制限
+    send_targets = new_items[:3]
     bubbles = []
 
     for item_key, title, link in send_targets:
@@ -254,12 +262,12 @@ def main():
     try:
         with ApiClient(configuration) as api_client:
             line_bot_api = MessagingApi(api_client)
-            broadcast_request = BroadcastRequest(messages=[flex_msg])
-            line_bot_api.broadcast(broadcast_request)
+            # 全体放送(broadcast)ではなく指定のUSER_ID宛て(push)に変更
+            push_request = PushMessageRequest(to=USER_ID, messages=[flex_msg])
+            line_bot_api.push_message(push_request)
         
-        # 送信完了後に既読登録
         mark_as_seen([(item_key, url, title) for item_key, title, url in send_targets])
-        print(f"★全登録者へ新着・在庫更新 {len(send_targets)}件のカルーセル通知を一括送信しました。")
+        print(f"★管理ユーザー宛てに新着・在庫更新 {len(send_targets)}件のテスト通知（smallサイズ）を送信しました。")
     except Exception as e:
         print(f"★送信エラー: {e}")
 
