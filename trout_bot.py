@@ -18,11 +18,10 @@ from linebot.v3.messaging import (
 )
 
 # ==========================================
-# ★テストモード設定（True: 強制通知 / False: 通常動作）
-# 特価コーナー抽出精度向上のテスト
+# ★本番モード設定（False: 通常動作 / 新着のみ通知）
 # ==========================================
-TEST_MODE = True
-MAX_NOTIFY_LIMIT = 10 if TEST_MODE else 5
+TEST_MODE = False
+MAX_NOTIFY_LIMIT = 5
 
 CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN', '').strip()
 TARGET_URL = "https://troutisland.shop-pro.jp/"
@@ -169,7 +168,6 @@ def extract_sale_items():
                         products[pid] = {"title": "", "img_url": None}
                     
                     text = clean_text(a.get_text())
-                    # ★安全対策: 意味のない短いテキストや、単なる価格表示、SOLD OUTをタイトルから除外
                     if text and "SOLD OUT" not in text and not re.fullmatch(r'[\d,]+円.*', text):
                         if len(text) > len(products[pid]["title"]):
                             products[pid]["title"] = text
@@ -177,7 +175,6 @@ def extract_sale_items():
                     img_tag = a.find('img')
                     if img_tag and img_tag.get('src'):
                         raw_src = img_tag.get('src')
-                        # 小さなアイコン画像などは除外
                         if "spacer" not in raw_src and "icon" not in raw_src:
                             img_url = urljoin(SALE_URL, raw_src).replace("http://", "https://")
                             parsed = urllib.parse.urlparse(img_url)
@@ -187,7 +184,6 @@ def extract_sale_items():
         for pid, data in products.items():
             title = data["title"]
             img_url = data["img_url"]
-            # ★安全対策: 「画像」と「タイトル」が両方揃っているものだけを本物の商品として扱う（サイドバー誤検知をブロック）
             if title and img_url:
                 items.append((title, SALE_URL, img_url, "特価コーナー！"))
             
@@ -316,9 +312,9 @@ def main():
     
     clean_site_text = clean_text(soup.get_text())
     if "特価" in clean_site_text:
-        print("★特価コーナー表示を検知しました。特価商品をチェックします。")
         sale_items = extract_sale_items()
-        raw_items = sale_items + raw_items 
+        # ★通常新入荷を優先し、特価商品は後ろに追加（枠の独占を防止）
+        raw_items = raw_items + sale_items 
 
     all_current_items = [(generate_key(url, title), url, title) for title, url, img_url, keyword in raw_items]
 
@@ -332,7 +328,6 @@ def main():
     seen_keys = set()
 
     if TEST_MODE:
-        print("★テストモード実行中: DBチェックをスキップして最新アイテムを取得します。")
         for title, url, img_url, keyword in raw_items:
             item_key = generate_key(url, title)
             if item_key not in seen_keys:
@@ -347,6 +342,12 @@ def main():
 
     if not new_items:
         print("「新入荷＆在庫更新情報」の新しい更新はありませんでした。")
+        return
+
+    # ★安全装置（大量通知ストッパー）
+    if len(new_items) > MAX_NOTIFY_LIMIT:
+        print(f"★安全装置発動: 新着が{len(new_items)}件（上限{MAX_NOTIFY_LIMIT}件超え）のため、大量通知を防ぐべくDBのみ更新します。")
+        mark_as_seen(all_current_items)
         return
 
     if not TEST_MODE:
