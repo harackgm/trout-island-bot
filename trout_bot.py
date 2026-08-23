@@ -19,7 +19,7 @@ from linebot.v3.messaging import (
 
 # ==========================================
 # ★テストモード設定（True: 強制5件通知 / False: 通常動作）
-# サイズ確認用にもう一度 True にしています。確認後 False に戻してください。
+# イレギュラーパターンの抽出テスト用
 # ==========================================
 TEST_MODE = True
 MAX_NOTIFY_LIMIT = 5
@@ -88,6 +88,7 @@ def extract_updates(soup):
         a_tags = block.find_all('a', href=True)
         extracted_texts = set()
         
+        # 1. 通常のリンクあり商品の抽出
         for a in a_tags:
             href = clean_text(a['href'])
             text = clean_text(a.get_text())
@@ -113,27 +114,38 @@ def extract_updates(soup):
                 extracted_texts.add(text)
                 items.append((text, full_url, status_keyword))
 
+        # 2. リンクなし（イレギュラー告知）の抽出
         lines = block.get_text(separator='\n').split('\n')
         for i, line in enumerate(lines):
             clean_line = clean_text(line)
             if not clean_line:
                 continue
             
-            if "店頭販売中" in clean_line or "ネット販売" in clean_line:
+            # ★「特価コーナー」「店頭販売中」「ネット販売」を含む行を検知
+            if "店頭販売中" in clean_line or "ネット販売" in clean_line or "特価コーナー" in clean_line:
+                # 既にリンクありとして抽出済みの場合はスキップ
                 if any(ext_text in clean_line for ext_text in extracted_texts):
                     continue
                 
                 title = clean_line
+                # 「↑」記号があれば、前の行と結合して1つの商品名にする
                 if "↑" in clean_line and i > 0:
                     title = clean_text(lines[i-1]) + " " + clean_line
 
                 link = "" 
-                status_keyword = "店頭販売中！"
-                if "ネット販売" in title:
+                status_keyword = "お知らせ"
+                
+                # キーワード判定
+                if "特価コーナー" in title:
+                    status_keyword = "特価コーナー！"
+                elif "ネット販売" in title:
                     status_keyword = "予告・お知らせ"
+                elif "店頭販売中" in title:
+                    status_keyword = "店頭販売中！"
 
                 items.append((title, link, status_keyword))
 
+    # 重複の排除
     unique_items = []
     seen_titles = set()
     for item in items:
@@ -174,12 +186,14 @@ def create_flex_bubble(title, link, img_url, keyword):
         keyword_color = "#FF4500"
     elif keyword == "再入荷！":
         keyword_color = "#32CD32"
+    elif keyword == "特価コーナー！":
+        keyword_color = "#FF0000" # 特価コーナーは赤色
     elif keyword in ["ご予約開始！", "店頭販売中！", "予告・お知らせ"]:
         keyword_color = "#FF69B4"
 
     bubble = {
         "type": "bubble",
-        "size": "kilo", # ★ここを micro から kilo（標準幅）に変更しました
+        "size": "kilo", 
         "body": {
             "type": "box",
             "layout": "vertical",
