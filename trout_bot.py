@@ -19,14 +19,15 @@ from linebot.v3.messaging import (
 
 # ==========================================
 # ★テストモード設定（True: 強制通知 / False: 通常動作）
-# イレギュラーパターンの抽出テスト用
+# 特価コーナーの商品自動検知テスト
 # ==========================================
 TEST_MODE = True
-# テスト漏れを防ぐため一時的にLINE上限の10件に変更
+# 枠に埋もれないようテスト時のみ上限を10件に拡張
 MAX_NOTIFY_LIMIT = 10 if TEST_MODE else 5
 
 CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN', '').strip()
 TARGET_URL = "https://troutisland.shop-pro.jp/"
+SALE_URL = "http://troutisland.shop-pro.jp/?mode=cate&cbid=1923704&csid=0"
 DB_FILE = "products.db"
 
 def init_db():
@@ -77,12 +78,9 @@ def extract_updates(soup):
     items = []
     target_blocks = []
     
-    # ★修正箇所1: 監視対象とするエリアの条件キーワードを拡張
-    target_keywords = ['新入荷', '在庫更新', '特価コーナー', '店頭販売中', 'ネット販売']
-    
     for tag in soup.find_all(['td', 'div', 'p', 'table']):
         text = tag.get_text()
-        if any(kw in text for kw in target_keywords) and not ('オススメ' in text or 'おすすめ' in text):
+        if ('新入荷' in text or '在庫更新' in text) and not ('オススメ' in text or 'おすすめ' in text):
             target_blocks.append(tag)
 
     if not target_blocks:
@@ -92,7 +90,7 @@ def extract_updates(soup):
         a_tags = block.find_all('a', href=True)
         extracted_texts = set()
         
-        # 1. 通常のリンクあり商品の抽出
+        # 1. 通常商品の抽出
         for a in a_tags:
             href = clean_text(a['href'])
             text = clean_text(a.get_text())
@@ -115,11 +113,9 @@ def extract_updates(soup):
                 elif "予約" in full_check_text:
                     status_keyword = "ご予約開始！"
 
-                # 文字が短すぎると誤検知でリンクなし告知を消してしまうため、ある程度長い場合のみ記録
                 if len(text) > 4:
                     extracted_texts.add(text)
-                
-                items.append((text, full_url, status_keyword))
+                items.append((text, full_url, None, status_keyword))
 
         # 2. リンクなし（イレギュラー告知）の抽出
         lines = block.get_text(separator='\n').split('\n')
@@ -128,30 +124,24 @@ def extract_updates(soup):
             if not clean_line:
                 continue
             
-            # 「特価コーナー」「店頭販売中」「ネット販売」を含む行を検知
-            if "店頭販売中" in clean_line or "ネット販売" in clean_line or "特価コーナー" in clean_line:
-                # 既にリンクありとして抽出済みの場合はスキップ
+            # ※特価コーナーは専用アクセス処理で行うため、ここでは「店頭・ネット販売」のみ検知
+            if "店頭販売中" in clean_line or "ネット販売" in clean_line:
                 if any(ext_text in clean_line for ext_text in extracted_texts):
                     continue
                 
                 title = clean_line
-                # 「↑」記号があれば、前の行と結合して1つの商品名にする
                 if "↑" in clean_line and i > 0:
                     title = clean_text(lines[i-1]) + " " + clean_line
 
                 link = "" 
                 status_keyword = "お知らせ"
-                
-                if "特価コーナー" in title:
-                    status_keyword = "特価コーナー！"
-                elif "ネット販売" in title:
+                if "ネット販売" in title:
                     status_keyword = "予告・お知らせ"
                 elif "店頭販売中" in title:
                     status_keyword = "店頭販売中！"
 
-                items.append((title, link, status_keyword))
+                items.append((title, link, None, status_keyword))
 
-    # 重複の排除
     unique_items = []
     seen_titles = set()
     for item in items:
@@ -160,6 +150,50 @@ def extract_updates(soup):
             seen_titles.add(item[0])
 
     return unique_items
+
+def extract_sale_items():
+    """特価コーナーのURLへアクセスし、中の商品と画像を個別に抽出する"""
+    items = []
+    try:
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        res = requests.get(SALE_URL, headers=headers, timeout=10)
+        res.encoding = res.apparent_encoding
+        soup = BeautifulSoup(res.text, "html.parser")
+        
+        products = {}
+        # 商品リンク（pidが含まれるaタグ）を探す
+        for a in soup.find_all('a', href=True):
+            href = clean_text(a['href'])
+            if 'pid=' in href:
+                pid_match = re.search(r'pid=(\d+)', href)
+                if pid_match:
+                    pid = pid_match.group(1)
+                    if pid not in products:
+                        products[pid] = {"title": "", "img_url": None}
+                    
+                    # 画像タグとテキストタグが分かれているカラーミーの仕様に対応
+                    text = clean_text(a.get_text())
+                    if len(text) > len(products[pid]["title"]):
+                        products[pid]["title"] = text
+                        
+                    img_tag = a.find('img')
+                    if img_tag and img_tag.get('src'):
+                        raw_src = img_tag.get('src')
+                        img_url = urljoin(SALE_URL, raw_src).replace("http://", "https://")
+                        parsed = urllib.parse.urlparse(img_url)
+                        safe_path = urllib.parse.quote(parsed.path)
+                        products[pid]["img_url"] = urllib.parse.urlunparse((parsed.scheme, parsed.netloc, safe_path, parsed.params, parsed.query, parsed.fragment))
+
+        # 抽出した商品をリストにまとめる
+        for pid, data in products.items():
+            title = data["title"] if data["title"] else f"特価アイテム (ID:{pid})"
+            img_url = data["img_url"]
+            # リンク先はご指定通り特価のルート(SALE_URL)固定
+            items.append((title, SALE_URL, img_url, "特価コーナー！"))
+            
+    except Exception as e:
+        print(f"特価コーナー取得エラー: {e}")
+    return items
 
 def fetch_product_image(product_url):
     if not product_url:
@@ -193,7 +227,7 @@ def create_flex_bubble(title, link, img_url, keyword):
     elif keyword == "再入荷！":
         keyword_color = "#32CD32"
     elif keyword == "特価コーナー！":
-        keyword_color = "#FF0000" # 赤色
+        keyword_color = "#FF0000" 
     elif keyword in ["ご予約開始！", "店頭販売中！", "予告・お知らせ"]:
         keyword_color = "#FF69B4"
 
@@ -278,8 +312,16 @@ def main():
         print(f"サイトアクセスエラー: {e}")
         return
 
+    # 通常商品の抽出
     raw_items = extract_updates(soup)
-    all_current_items = [(generate_key(url, title), url, title) for title, url, keyword in raw_items]
+    
+    # ★スマート検知: トップページに「特価コーナー」の文字があれば、特価ページをスクレイピング
+    if "特価コーナー" in soup.get_text():
+        print("★特価コーナー表示を検知しました。特価商品をチェックします。")
+        sale_items = extract_sale_items()
+        raw_items.extend(sale_items) # 通常商品と特価商品を合体させる
+
+    all_current_items = [(generate_key(url, title), url, title) for title, url, img_url, keyword in raw_items]
 
     if is_first_run:
         mark_as_seen(all_current_items)
@@ -292,17 +334,17 @@ def main():
 
     if TEST_MODE:
         print("★テストモード実行中: DBチェックをスキップして最新アイテムを取得します。")
-        for title, url, keyword in raw_items:
+        for title, url, img_url, keyword in raw_items:
             item_key = generate_key(url, title)
             if item_key not in seen_keys:
                 seen_keys.add(item_key)
-                new_items.append((item_key, title, url, keyword))
+                new_items.append((item_key, title, url, img_url, keyword))
     else:
-        for title, url, keyword in raw_items:
+        for title, url, img_url, keyword in raw_items:
             item_key = generate_key(url, title)
             if item_key not in seen_keys and not is_seen(item_key):
                 seen_keys.add(item_key)
-                new_items.append((item_key, title, url, keyword))
+                new_items.append((item_key, title, url, img_url, keyword))
 
     if not new_items:
         print("「新入荷＆在庫更新情報」の新しい更新はありませんでした。")
@@ -314,8 +356,12 @@ def main():
     send_targets = new_items[:MAX_NOTIFY_LIMIT]
     
     bubbles = []
-    for item_key, title, link, keyword in send_targets:
-        img_url = fetch_product_image(link) if link else None
+    for item_key, title, link, pre_img_url, keyword in send_targets:
+        # 特価コーナーですでに画像取得済みの場合はフェッチ処理をスキップ（サーバー負荷軽減）
+        img_url = pre_img_url
+        if not img_url and link:
+            img_url = fetch_product_image(link)
+            
         bubble = create_flex_bubble(title, link, img_url, keyword)
         bubbles.append(bubble)
 
