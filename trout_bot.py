@@ -15,7 +15,7 @@ from linebot.v3.messaging import (
     FlexMessage,
     FlexContainer
 )
-from linebot.v3.exceptions import LineBotApiError
+from linebot.v3.messaging.rest import ApiException
 
 CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN', '').strip()
 USER_ID = os.environ.get('LINE_USER_ID', '').strip()
@@ -263,8 +263,9 @@ def main():
         
         mark_as_seen([(item_key, url, title) for item_key, title, url in send_targets])
         print(f"★管理ユーザー宛てに新着・在庫更新 {len(send_targets)}件のテスト通知を送信しました。")
-    except LineBotApiError as e:
-        print(f"★LINE API エラー詳細: status_code={e.status_code}, error={e.error}")
+    except ApiException as e:
+        print(f"★LINE API エラー詳細: status={e.status}, reason={e.reason}")
+        print(f"★エラーボディ: {e.body}")
     except Exception as e:
         print(f"★送信エラー: {e}")
 
