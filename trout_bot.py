@@ -103,14 +103,15 @@ def fetch_product_image(product_url, headers):
 def create_bubble(title, link, img_url):
     safe_title = title if len(title) <= 60 else title[:57] + "..."
     
+    # LINE公式で保証されている標準仕様のBubble構造
     return {
         "type": "bubble",
-        "size": "deca",
+        "size": "kilo",  # 標準サイズのkiloに変更
         "hero": {
             "type": "image",
             "url": img_url,
             "size": "full",
-            "aspectRatio": "4:3",
+            "aspectRatio": "20:13",
             "aspectMode": "cover"
         },
         "body": {
