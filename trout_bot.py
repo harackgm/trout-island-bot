@@ -102,7 +102,6 @@ def extract_updates(soup):
             
             full_context_text = text + " " + parent_text + " " + grandparent_text
             
-            # リンク内のテキストが短い場合、親要素からタイトルを保管
             display_title = text
             if len(display_title) < 3 and parent_text:
                 display_title = parent_text
@@ -118,10 +117,9 @@ def extract_updates(soup):
                     status_keyword = "ご予約開始！"
                 elif "新入荷" in full_context_text:
                     status_keyword = "新入荷！"
-                elif "再入荷" in full_context_text:
+                elif "再入荷" in full_check_text if 'full_check_text' in locals() else "再入荷" in full_context_text:
                     status_keyword = "再入荷！"
 
-                # タイトルのクリーンアップ（「ご予約受付中！！」等のステータス文字を除去）
                 clean_title = re.sub(r'ご予約受付中！*|新入荷！*|再入荷！*|在庫更新！*', '', display_title).strip()
                 if not clean_title:
                     clean_title = display_title
@@ -364,6 +362,7 @@ def main():
         mark_as_seen(all_current_items)
         return
 
+    # 送信前にDBへ保存（APIエラー時も既読状態を維持し、送信連投爆撃を防止）
     if not TEST_MODE:
         mark_as_seen(all_current_items)
 
@@ -399,7 +398,7 @@ def main():
         
         print(f"★全登録者へ {len(send_targets)}件をFlex Message形式で正常送信しました。")
     except Exception as e:
-        print(f"★送信エラー: {e}")
+        print(f"★送信エラー (LINE枠超過等の可能性があります): {e}")
 
 if __name__ == "__main__":
     main()
