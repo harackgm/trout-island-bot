@@ -19,10 +19,9 @@ from linebot.v3.messaging import (
 )
 
 # ==========================================
-# ★テスト送信モード（True: 1件だけテスト送信 / False: 本番自動巡回）
+# ★テスト送信専用モード（先頭1件のみ安全にテスト送信）
 # ==========================================
 TEST_MODE = True
-MAX_NOTIFY_LIMIT = 5
 
 CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN', '').strip()
 TARGET_URL = "https://troutisland.shop-pro.jp/"
@@ -50,22 +49,6 @@ def generate_key(url, title):
     raw_str = f"{url}_{title}"
     return hashlib.md5(raw_str.encode('utf-8')).hexdigest()
 
-def is_seen(item_key):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('SELECT 1 FROM seen_items WHERE item_key = ?', (item_key,))
-    row = c.fetchone()
-    conn.close()
-    return row is not None
-
-def mark_as_seen(items):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    for item_key, url, title in items:
-        c.execute('INSERT OR IGNORE INTO seen_items (item_key, url, title) VALUES (?, ?, ?)', (item_key, url, title))
-    conn.commit()
-    conn.close()
-
 def clean_text(text):
     if not text:
         return ""
@@ -89,7 +72,6 @@ def extract_updates(soup):
         a_tags = block.find_all('a', href=True)
         extracted_texts = set()
         
-        # 1. 通常商品・予約商品のリンク抽出
         for a in a_tags:
             href = clean_text(a['href'])
             text = clean_text(a.get_text())
@@ -129,30 +111,6 @@ def extract_updates(soup):
                     extracted_texts.add(clean_title)
                 items.append((clean_title, full_url, None, status_keyword))
 
-        # 2. リンクなし（店頭販売・ネット販売等）の抽出
-        lines = block.get_text(separator='\n').split('\n')
-        for i, line in enumerate(lines):
-            clean_line = clean_text(line)
-            if not clean_line:
-                continue
-            
-            if "店頭販売中" in clean_line or "ネット販売" in clean_line:
-                if any(ext_text in clean_line for ext_text in extracted_texts):
-                    continue
-                
-                title = clean_line
-                if "↑" in clean_line and i > 0:
-                    title = clean_text(lines[i-1]) + " " + clean_line
-
-                link = "" 
-                status_keyword = "お知らせ"
-                if "ネット販売" in title:
-                    status_keyword = "予告・お知らせ"
-                elif "店頭販売中" in title:
-                    status_keyword = "店頭販売中！"
-
-                items.append((title, link, None, status_keyword))
-
     unique_items = []
     seen_titles = set()
     for item in items:
@@ -161,49 +119,6 @@ def extract_updates(soup):
             seen_titles.add(item[0])
 
     return unique_items
-
-def extract_sale_items():
-    """特価コーナーのURLへアクセスし、画像を持つ本物の商品だけを抽出する"""
-    items = []
-    try:
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-        res = requests.get(SALE_URL, headers=headers, timeout=10)
-        res.encoding = res.apparent_encoding
-        soup = BeautifulSoup(res.text, "html.parser")
-        
-        products = {}
-        for a in soup.find_all('a', href=True):
-            href = clean_text(a['href'])
-            if 'pid=' in href:
-                pid_match = re.search(r'pid=(\d+)', href)
-                if pid_match:
-                    pid = pid_match.group(1)
-                    if pid not in products:
-                        products[pid] = {"title": "", "img_url": None}
-                    
-                    text = clean_text(a.get_text())
-                    if text and "SOLD OUT" not in text and not re.fullmatch(r'[\d,]+円.*', text):
-                        if len(text) > len(products[pid]["title"]):
-                            products[pid]["title"] = text
-                        
-                    img_tag = a.find('img')
-                    if img_tag and img_tag.get('src'):
-                        raw_src = img_tag.get('src')
-                        if "spacer" not in raw_src and "icon" not in raw_src:
-                            img_url = urljoin(SALE_URL, raw_src).replace("http://", "https://")
-                            parsed = urllib.parse.urlparse(img_url)
-                            safe_path = urllib.parse.quote(parsed.path)
-                            products[pid]["img_url"] = urllib.parse.urlunparse((parsed.scheme, parsed.netloc, safe_path, parsed.params, parsed.query, parsed.fragment))
-
-        for pid, data in products.items():
-            title = data["title"]
-            img_url = data["img_url"]
-            if title and img_url:
-                items.append((title, SALE_URL, img_url, "特価コーナー！"))
-            
-    except Exception as e:
-        print(f"特価コーナー取得エラー: {e}")
-    return items
 
 def fetch_product_image(product_url):
     if not product_url:
@@ -311,7 +226,7 @@ def main():
         print("エラー: Secrets LINE_CHANNEL_ACCESS_TOKEN が設定されていません。")
         sys.exit(1)
 
-    is_first_run = init_db()
+    init_db()
 
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     try:
@@ -324,48 +239,15 @@ def main():
 
     raw_items = extract_updates(soup)
     
-    clean_site_text = clean_text(soup.get_text())
-    if "特価" in clean_site_text:
-        sale_items = extract_sale_items()
-        raw_items = raw_items + sale_items 
-
-    all_current_items = [(generate_key(url, title), url, title) for title, url, img_url, keyword in raw_items]
-
-    if is_first_run:
-        mark_as_seen(all_current_items)
-        print(f"★初回セットアップ完了: 過去データ {len(all_current_items)}件をDB登録しました。")
-        if not TEST_MODE:
-            return
-
-    new_items = []
-    seen_keys = set()
-
-    if TEST_MODE:
-        # ★テストモード時: 安全に先頭1件だけを抽出
-        if raw_items:
-            title, url, img_url, keyword = raw_items[0]
-            item_key = generate_key(url, title)
-            new_items.append((item_key, title, url, img_url, keyword))
-            print("★テスト送信モード稼働中: 先頭1件のみテスト送信します。")
-    else:
-        for title, url, img_url, keyword in raw_items:
-            item_key = generate_key(url, title)
-            if item_key not in seen_keys and not is_seen(item_key):
-                seen_keys.add(item_key)
-                new_items.append((item_key, title, url, img_url, keyword))
-
-    if not new_items:
-        print("「新入荷＆在庫更新情報」および「ご予約コーナー」の新しい更新はありませんでした。")
+    if not raw_items:
+        print("テスト対象の商品が見つかりませんでした。")
         return
 
-    # ★本番モード時のみ大量通知ストッパーを発動
-    if not TEST_MODE and len(new_items) > MAX_NOTIFY_LIMIT:
-        print(f"★安全装置発動: 新着が{len(new_items)}件（上限{MAX_NOTIFY_LIMIT}件超え）のため、大量通知を防ぐべくDBのみ更新します。")
-        mark_as_seen(all_current_items)
-        return
+    # ★安全対策: 1件のみ強制固定
+    title, url, img_url, keyword = raw_items[0]
+    send_targets = [(generate_key(url, title), title, url, img_url, keyword)]
+    print("★テスト送信動作: 先頭1件のみ安全にテスト送信を行います。")
 
-    send_targets = new_items[:1] if TEST_MODE else new_items[:MAX_NOTIFY_LIMIT]
-    
     bubbles = []
     for item_key, title, link, pre_img_url, keyword in send_targets:
         img_url = pre_img_url
@@ -380,9 +262,8 @@ def main():
         "contents": bubbles
     }
 
-    prefix_text = "【テスト送信】" if TEST_MODE else "【新着・在庫更新情報】"
     flex_message = FlexMessage(
-        alt_text=f"{prefix_text}({len(send_targets)}件)",
+        alt_text=f"【テスト送信】(1件)",
         contents=FlexContainer.from_dict(flex_container_dict)
     )
 
@@ -394,19 +275,15 @@ def main():
             broadcast_request = BroadcastRequest(messages=[flex_message])
             line_bot_api.broadcast(broadcast_request)
         
-        print(f"★全登録者へ {len(send_targets)}件をFlex Message形式で正常送信しました。")
-        if not TEST_MODE:
-            mark_as_seen(all_current_items)
+        print("★テストメッセージ1通を正常に送信しました。")
 
     except Exception as e:
         err_msg = str(e)
         print(f"★送信エラーが発生しました: {err_msg}")
         
         if "monthly limit" in err_msg.lower() or "429" in err_msg:
-            print("【緊急警告】LINEの月間送信上限（200通）に達しました！GitHub Actionsをエラー停止させて通知します。")
+            print("【緊急警告】LINEの月間送信上限に達しました！")
             sys.exit(1)
-        else:
-            print("一時的な通信エラーのため、未読データは次回へ繰り越します。")
 
 if __name__ == "__main__":
     main()
