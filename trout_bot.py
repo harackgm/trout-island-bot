@@ -19,10 +19,10 @@ from linebot.v3.messaging import (
 )
 
 # ==========================================
-# ★テスト送信モード（1件だけLINEへ送信確認を行います）
+# ★テスト送信モード（True: 1件だけテスト送信 / False: 本番自動巡回）
 # ==========================================
 TEST_MODE = True
-MAX_NOTIFY_LIMIT = 1
+MAX_NOTIFY_LIMIT = 5
 
 CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN', '').strip()
 TARGET_URL = "https://troutisland.shop-pro.jp/"
@@ -341,11 +341,12 @@ def main():
     seen_keys = set()
 
     if TEST_MODE:
-        for title, url, img_url, keyword in raw_items:
+        # ★テストモード時: 安全に先頭1件だけを抽出
+        if raw_items:
+            title, url, img_url, keyword = raw_items[0]
             item_key = generate_key(url, title)
-            if item_key not in seen_keys:
-                seen_keys.add(item_key)
-                new_items.append((item_key, title, url, img_url, keyword))
+            new_items.append((item_key, title, url, img_url, keyword))
+            print("★テスト送信モード稼働中: 先頭1件のみテスト送信します。")
     else:
         for title, url, img_url, keyword in raw_items:
             item_key = generate_key(url, title)
@@ -357,13 +358,13 @@ def main():
         print("「新入荷＆在庫更新情報」および「ご予約コーナー」の新しい更新はありませんでした。")
         return
 
-    # ★大量通知ストッパー（安全装置）
-    if len(new_items) > MAX_NOTIFY_LIMIT:
+    # ★本番モード時のみ大量通知ストッパーを発動
+    if not TEST_MODE and len(new_items) > MAX_NOTIFY_LIMIT:
         print(f"★安全装置発動: 新着が{len(new_items)}件（上限{MAX_NOTIFY_LIMIT}件超え）のため、大量通知を防ぐべくDBのみ更新します。")
         mark_as_seen(all_current_items)
         return
 
-    send_targets = new_items[:MAX_NOTIFY_LIMIT]
+    send_targets = new_items[:1] if TEST_MODE else new_items[:MAX_NOTIFY_LIMIT]
     
     bubbles = []
     for item_key, title, link, pre_img_url, keyword in send_targets:
