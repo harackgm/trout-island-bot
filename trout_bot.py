@@ -96,13 +96,17 @@ def extract_updates(soup):
             if not href or 'mode=cate' in href or 'cart' in href or 'myaccount' in href or href in ['/', '#']:
                 continue
 
-            # 親要素および周辺テキストを取得して判定精度を強化
             parent_tag = a.parent
             parent_text = clean_text(parent_tag.get_text()) if parent_tag else ""
             grandparent_text = clean_text(parent_tag.parent.get_text()) if parent_tag and parent_tag.parent else ""
             
             full_context_text = text + " " + parent_text + " " + grandparent_text
             
+            # リンク内のテキストが短い場合、親要素からタイトルを保管
+            display_title = text
+            if len(display_title) < 3 and parent_text:
+                display_title = parent_text
+
             has_date = bool(re.search(r'\d{1,2}/\d{1,2}', full_context_text))
             is_reservation = ("予約" in full_context_text or "ご予約" in full_context_text)
 
@@ -117,9 +121,14 @@ def extract_updates(soup):
                 elif "再入荷" in full_context_text:
                     status_keyword = "再入荷！"
 
-                if len(text) > 2:
-                    extracted_texts.add(text)
-                items.append((text, full_url, None, status_keyword))
+                # タイトルのクリーンアップ（「ご予約受付中！！」等のステータス文字を除去）
+                clean_title = re.sub(r'ご予約受付中！*|新入荷！*|再入荷！*|在庫更新！*', '', display_title).strip()
+                if not clean_title:
+                    clean_title = display_title
+
+                if len(clean_title) > 2:
+                    extracted_texts.add(clean_title)
+                items.append((clean_title, full_url, None, status_keyword))
 
         # 2. リンクなし（店頭販売・ネット販売等）の抽出
         lines = block.get_text(separator='\n').split('\n')
