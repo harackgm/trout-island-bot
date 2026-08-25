@@ -96,26 +96,28 @@ def extract_updates(soup):
             if not href or 'mode=cate' in href or 'cart' in href or 'myaccount' in href or href in ['/', '#']:
                 continue
 
-            parent_text = clean_text(a.parent.get_text()) if a.parent else ""
-            block_text = clean_text(block.get_text())
+            # 親要素および周辺テキストを取得して判定精度を強化
+            parent_tag = a.parent
+            parent_text = clean_text(parent_tag.get_text()) if parent_tag else ""
+            grandparent_text = clean_text(parent_tag.parent.get_text()) if parent_tag and parent_tag.parent else ""
             
-            # 【判定強化】日付があるか、またはテキスト/周辺に「予約」が含まれているか
-            has_date = bool(re.search(r'\d{1,2}/\d{1,2}', text) or re.search(r'\d{1,2}/\d{1,2}', parent_text))
-            full_check_text = text + " " + parent_text + " " + block_text
-            is_reservation = ("予約" in full_check_text or "ご予約" in full_check_text)
+            full_context_text = text + " " + parent_text + " " + grandparent_text
+            
+            has_date = bool(re.search(r'\d{1,2}/\d{1,2}', full_context_text))
+            is_reservation = ("予約" in full_context_text or "ご予約" in full_context_text)
 
             if (has_date or is_reservation) and ('pid=' in href or 'shop-pro.jp' in href):
                 full_url = urljoin(TARGET_URL, href)
                 
                 status_keyword = "更新・お知らせ"
-                if "予約" in full_check_text or "ご予約" in full_check_text:
+                if "予約" in full_context_text or "ご予約" in full_context_text:
                     status_keyword = "ご予約開始！"
-                elif "新入荷" in full_check_text:
+                elif "新入荷" in full_context_text:
                     status_keyword = "新入荷！"
-                elif "再入荷" in full_check_text:
+                elif "再入荷" in full_context_text:
                     status_keyword = "再入荷！"
 
-                if len(text) > 4:
+                if len(text) > 2:
                     extracted_texts.add(text)
                 items.append((text, full_url, None, status_keyword))
 
