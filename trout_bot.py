@@ -19,10 +19,10 @@ from linebot.v3.messaging import (
 )
 
 # ==========================================
-# ★本番モード設定（False: 通常動作 / 新着のみ通知）
+# ★テスト送信モード（1件だけLINEへ送信確認を行います）
 # ==========================================
-TEST_MODE = False
-MAX_NOTIFY_LIMIT = 5
+TEST_MODE = True
+MAX_NOTIFY_LIMIT = 1
 
 CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN', '').strip()
 TARGET_URL = "https://troutisland.shop-pro.jp/"
@@ -401,12 +401,10 @@ def main():
         err_msg = str(e)
         print(f"★送信エラーが発生しました: {err_msg}")
         
-        # 月間無料通数上限エラー（429 Too Many Requests または Limit エラー）の場合
         if "monthly limit" in err_msg.lower() or "429" in err_msg:
             print("【緊急警告】LINEの月間送信上限（200通）に達しました！GitHub Actionsをエラー停止させて通知します。")
-            sys.exit(1) # GitHub Actionsを失敗（赤マーク）にして管理者に異変を通知
+            sys.exit(1)
         else:
-            # その他の臨時通信エラー等は次回へ繰り越し
             print("一時的な通信エラーのため、未読データは次回へ繰り越します。")
 
 if __name__ == "__main__":
