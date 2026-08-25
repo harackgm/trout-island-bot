@@ -76,9 +76,10 @@ def extract_updates(soup):
     items = []
     target_blocks = []
     
+    # ★「ご予約」ブロックも監視対象に追加
     for tag in soup.find_all(['td', 'div', 'p', 'table']):
         text = tag.get_text()
-        if ('新入荷' in text or '在庫更新' in text) and not ('オススメ' in text or 'おすすめ' in text):
+        if ('新入荷' in text or '在庫更新' in text or 'ご予約' in text or '予約' in text) and not ('オススメ' in text or 'おすすめ' in text):
             target_blocks.append(tag)
 
     if not target_blocks:
@@ -88,7 +89,7 @@ def extract_updates(soup):
         a_tags = block.find_all('a', href=True)
         extracted_texts = set()
         
-        # 1. 通常商品の抽出
+        # 1. 通常商品・予約商品のリンク抽出
         for a in a_tags:
             href = clean_text(a['href'])
             text = clean_text(a.get_text())
@@ -97,25 +98,30 @@ def extract_updates(soup):
                 continue
 
             parent_text = clean_text(a.parent.get_text()) if a.parent else ""
+            block_text = clean_text(block.get_text())
+            
+            # 日付があるか、または予約コーナー内のリンクか
             has_date = bool(re.search(r'\d{1,2}/\d{1,2}', text) or re.search(r'\d{1,2}/\d{1,2}', parent_text))
+            is_reservation = ('ご予約' in block_text or '予約' in block_text or 'ご予約' in text or '予約' in text)
 
-            if has_date and ('pid=' in href or 'shop-pro.jp' in href):
+            if (has_date or is_reservation) and ('pid=' in href or 'shop-pro.jp' in href):
                 full_url = urljoin(TARGET_URL, href)
                 
                 status_keyword = "更新・お知らせ"
-                full_check_text = text + " " + parent_text
-                if "新入荷" in full_check_text:
+                full_check_text = text + " " + parent_text + " " + block_text
+                
+                if "予約" in full_check_text or "ご予約" in full_check_text:
+                    status_keyword = "ご予約開始！"
+                elif "新入荷" in full_check_text:
                     status_keyword = "新入荷！"
                 elif "再入荷" in full_check_text:
                     status_keyword = "再入荷！"
-                elif "予約" in full_check_text:
-                    status_keyword = "ご予約開始！"
 
                 if len(text) > 4:
                     extracted_texts.add(text)
                 items.append((text, full_url, None, status_keyword))
 
-        # 2. リンクなし（イレギュラー告知）の抽出
+        # 2. リンクなし（店頭販売・ネット販売など）の抽出
         lines = block.get_text(separator='\n').split('\n')
         for i, line in enumerate(lines):
             clean_line = clean_text(line)
@@ -313,7 +319,6 @@ def main():
     clean_site_text = clean_text(soup.get_text())
     if "特価" in clean_site_text:
         sale_items = extract_sale_items()
-        # ★通常新入荷を優先し、特価商品は後ろに追加（枠の独占を防止）
         raw_items = raw_items + sale_items 
 
     all_current_items = [(generate_key(url, title), url, title) for title, url, img_url, keyword in raw_items]
@@ -341,10 +346,10 @@ def main():
                 new_items.append((item_key, title, url, img_url, keyword))
 
     if not new_items:
-        print("「新入荷＆在庫更新情報」の新しい更新はありませんでした。")
+        print("「新入荷＆在庫更新情報」および「ご予約コーナー」の新しい更新はありませんでした。")
         return
 
-    # ★安全装置（大量通知ストッパー）
+    # ★大量通知ストッパー（安全装置）
     if len(new_items) > MAX_NOTIFY_LIMIT:
         print(f"★安全装置発動: 新着が{len(new_items)}件（上限{MAX_NOTIFY_LIMIT}件超え）のため、大量通知を防ぐべくDBのみ更新します。")
         mark_as_seen(all_current_items)
