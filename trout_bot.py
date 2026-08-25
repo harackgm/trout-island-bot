@@ -1,4 +1,5 @@
 import os
+import sys
 import sqlite3
 import requests
 import re
@@ -117,7 +118,7 @@ def extract_updates(soup):
                     status_keyword = "ご予約開始！"
                 elif "新入荷" in full_context_text:
                     status_keyword = "新入荷！"
-                elif "再入荷" in full_check_text if 'full_check_text' in locals() else "再入荷" in full_context_text:
+                elif "再入荷" in full_context_text:
                     status_keyword = "再入荷！"
 
                 clean_title = re.sub(r'ご予約受付中！*|新入荷！*|再入荷！*|在庫更新！*', '', display_title).strip()
@@ -308,7 +309,7 @@ def create_flex_bubble(title, link, img_url, keyword):
 def main():
     if not CHANNEL_ACCESS_TOKEN:
         print("エラー: Secrets LINE_CHANNEL_ACCESS_TOKEN が設定されていません。")
-        return
+        sys.exit(1)
 
     is_first_run = init_db()
 
@@ -362,10 +363,6 @@ def main():
         mark_as_seen(all_current_items)
         return
 
-    # 送信前にDBへ保存（APIエラー時も既読状態を維持し、送信連投爆撃を防止）
-    if not TEST_MODE:
-        mark_as_seen(all_current_items)
-
     send_targets = new_items[:MAX_NOTIFY_LIMIT]
     
     bubbles = []
@@ -397,8 +394,20 @@ def main():
             line_bot_api.broadcast(broadcast_request)
         
         print(f"★全登録者へ {len(send_targets)}件をFlex Message形式で正常送信しました。")
+        if not TEST_MODE:
+            mark_as_seen(all_current_items)
+
     except Exception as e:
-        print(f"★送信エラー (LINE枠超過等の可能性があります): {e}")
+        err_msg = str(e)
+        print(f"★送信エラーが発生しました: {err_msg}")
+        
+        # 月間無料通数上限エラー（429 Too Many Requests または Limit エラー）の場合
+        if "monthly limit" in err_msg.lower() or "429" in err_msg:
+            print("【緊急警告】LINEの月間送信上限（200通）に達しました！GitHub Actionsをエラー停止させて通知します。")
+            sys.exit(1) # GitHub Actionsを失敗（赤マーク）にして管理者に異変を通知
+        else:
+            # その他の臨時通信エラー等は次回へ繰り越し
+            print("一時的な通信エラーのため、未読データは次回へ繰り越します。")
 
 if __name__ == "__main__":
     main()
