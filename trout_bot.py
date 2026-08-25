@@ -76,7 +76,6 @@ def extract_updates(soup):
     items = []
     target_blocks = []
     
-    # ★「ご予約」ブロックも監視対象に追加
     for tag in soup.find_all(['td', 'div', 'p', 'table']):
         text = tag.get_text()
         if ('新入荷' in text or '在庫更新' in text or 'ご予約' in text or '予約' in text) and not ('オススメ' in text or 'おすすめ' in text):
@@ -100,16 +99,15 @@ def extract_updates(soup):
             parent_text = clean_text(a.parent.get_text()) if a.parent else ""
             block_text = clean_text(block.get_text())
             
-            # 日付があるか、または予約コーナー内のリンクか
+            # 【判定強化】日付があるか、またはテキスト/周辺に「予約」が含まれているか
             has_date = bool(re.search(r'\d{1,2}/\d{1,2}', text) or re.search(r'\d{1,2}/\d{1,2}', parent_text))
-            is_reservation = ('ご予約' in block_text or '予約' in block_text or 'ご予約' in text or '予約' in text)
+            full_check_text = text + " " + parent_text + " " + block_text
+            is_reservation = ("予約" in full_check_text or "ご予約" in full_check_text)
 
             if (has_date or is_reservation) and ('pid=' in href or 'shop-pro.jp' in href):
                 full_url = urljoin(TARGET_URL, href)
                 
                 status_keyword = "更新・お知らせ"
-                full_check_text = text + " " + parent_text + " " + block_text
-                
                 if "予約" in full_check_text or "ご予約" in full_check_text:
                     status_keyword = "ご予約開始！"
                 elif "新入荷" in full_check_text:
@@ -121,7 +119,7 @@ def extract_updates(soup):
                     extracted_texts.add(text)
                 items.append((text, full_url, None, status_keyword))
 
-        # 2. リンクなし（店頭販売・ネット販売など）の抽出
+        # 2. リンクなし（店頭販売・ネット販売等）の抽出
         lines = block.get_text(separator='\n').split('\n')
         for i, line in enumerate(lines):
             clean_line = clean_text(line)
