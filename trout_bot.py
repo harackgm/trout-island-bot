@@ -19,9 +19,9 @@ from linebot.v3.messaging import (
 )
 
 # ==========================================
-# ★本番モード設定（False: 通常自動監視 / 新着のみ通知）
+# ★テスト送信モード（True: 先頭1件のみ安全テスト）
 # ==========================================
-TEST_MODE = False
+TEST_MODE = True
 MAX_NOTIFY_LIMIT = 5
 
 CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN', '').strip()
@@ -89,7 +89,6 @@ def extract_updates(soup):
         a_tags = block.find_all('a', href=True)
         extracted_texts = set()
         
-        # 1. 通常商品・予約商品のリンク抽出
         for a in a_tags:
             href = clean_text(a['href'])
             text = clean_text(a.get_text())
@@ -129,7 +128,6 @@ def extract_updates(soup):
                     extracted_texts.add(clean_title)
                 items.append((clean_title, full_url, None, status_keyword))
 
-        # 2. リンクなし（店頭販売・ネット販売等）の抽出
         lines = block.get_text(separator='\n').split('\n')
         for i, line in enumerate(lines):
             clean_line = clean_text(line)
@@ -163,7 +161,6 @@ def extract_updates(soup):
     return unique_items
 
 def extract_sale_items():
-    """特価コーナーのURLへアクセスし、画像を持つ本物の商品だけを抽出する"""
     items = []
     try:
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
@@ -206,6 +203,10 @@ def extract_sale_items():
     return items
 
 def fetch_product_image(product_url):
+    """
+    ショップの裏側設定(og:image)のミスを回避するため、
+    ページ上の本物の商品画像を最優先で探し出すよう改良
+    """
     if not product_url:
         return None
     try:
@@ -214,9 +215,22 @@ def fetch_product_image(product_url):
         res.encoding = res.apparent_encoding
         soup = BeautifulSoup(res.text, "html.parser")
         
-        og_img = soup.find("meta", property="og:image")
-        if og_img and og_img.get("content"):
-            img_url = og_img["content"]
+        img_url = None
+        
+        # 1. ページ内の「/product/」を含む画像を最優先で探す（本物の商品画像である確率が最も高い）
+        for img in soup.find_all('img'):
+            src = img.get('src', '')
+            if '/product/' in src and not 'icon' in src and not 'spacer' in src:
+                img_url = src
+                break
+                
+        # 2. 見つからなかった場合のみ、予備として従来の og:image を使用する
+        if not img_url:
+            og_img = soup.find("meta", property="og:image")
+            if og_img and og_img.get("content"):
+                img_url = og_img["content"]
+
+        if img_url:
             if img_url.startswith("//"):
                 img_url = "https:" + img_url
             elif img_url.startswith("http://"):
@@ -226,6 +240,7 @@ def fetch_product_image(product_url):
             safe_path = urllib.parse.quote(parsed.path)
             img_url = urllib.parse.urlunparse((parsed.scheme, parsed.netloc, safe_path, parsed.params, parsed.query, parsed.fragment))
             return img_url
+
     except Exception as e:
         print(f"画像取得エラー ({product_url}): {e}")
     return None
@@ -340,23 +355,30 @@ def main():
     new_items = []
     seen_keys = set()
 
-    for title, url, img_url, keyword in raw_items:
-        item_key = generate_key(url, title)
-        if item_key not in seen_keys and not is_seen(item_key):
-            seen_keys.add(item_key)
+    if TEST_MODE:
+        if raw_items:
+            title, url, img_url, keyword = raw_items[0]
+            item_key = generate_key(url, title)
             new_items.append((item_key, title, url, img_url, keyword))
+            print("★テスト送信モード稼働中: 先頭1件のみテスト送信します。")
+    else:
+        for title, url, img_url, keyword in raw_items:
+            item_key = generate_key(url, title)
+            if item_key not in seen_keys and not is_seen(item_key):
+                seen_keys.add(item_key)
+                new_items.append((item_key, title, url, img_url, keyword))
 
     if not new_items:
         print("「新入荷＆在庫更新情報」および「ご予約コーナー」の新しい更新はありませんでした。")
         return
 
     # ★大量通知ストッパー（安全装置）
-    if len(new_items) > MAX_NOTIFY_LIMIT:
+    if not TEST_MODE and len(new_items) > MAX_NOTIFY_LIMIT:
         print(f"★安全装置発動: 新着が{len(new_items)}件（上限{MAX_NOTIFY_LIMIT}件超え）のため、大量通知を防ぐべくDBのみ更新します。")
         mark_as_seen(all_current_items)
         return
 
-    send_targets = new_items[:MAX_NOTIFY_LIMIT]
+    send_targets = new_items[:1] if TEST_MODE else new_items[:MAX_NOTIFY_LIMIT]
     
     bubbles = []
     for item_key, title, link, pre_img_url, keyword in send_targets:
@@ -372,7 +394,7 @@ def main():
         "contents": bubbles
     }
 
-    prefix_text = "【新着・在庫更新情報】"
+    prefix_text = "【テスト送信】" if TEST_MODE else "【新着・在庫更新情報】"
     flex_message = FlexMessage(
         alt_text=f"{prefix_text}({len(send_targets)}件)",
         contents=FlexContainer.from_dict(flex_container_dict)
@@ -387,7 +409,8 @@ def main():
             line_bot_api.broadcast(broadcast_request)
         
         print(f"★全登録者へ {len(send_targets)}件をFlex Message形式で正常送信しました。")
-        mark_as_seen(all_current_items)
+        if not TEST_MODE:
+            mark_as_seen(all_current_items)
 
     except Exception as e:
         err_msg = str(e)
