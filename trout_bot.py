@@ -19,7 +19,7 @@ from linebot.v3.messaging import (
 )
 
 # ==========================================
-# ★テスト送信モード（True: 先頭1件のみ安全テスト）
+# ★テスト送信モード（True: イエローウルフ狙い撃ちテスト）
 # ==========================================
 TEST_MODE = True
 MAX_NOTIFY_LIMIT = 5
@@ -93,7 +93,6 @@ def extract_updates(soup):
             href = clean_text(a['href'])
             text = clean_text(a.get_text())
 
-            # ★修正: 商品詳細ページ(pid=を含む)以外のリンク（カテゴリーリンクやサイドバーのバナー等）を完全除外
             if not href or 'pid=' not in href:
                 continue
 
@@ -352,10 +351,21 @@ def main():
 
     if TEST_MODE:
         if raw_items:
-            title, url, img_url, keyword = raw_items[0]
+            # ★イエローウルフを強制的に探し出すスナイパー処理
+            target_item = None
+            for item in raw_items:
+                if "イエローウルフ" in item[0]:
+                    target_item = item
+                    break
+            
+            # 見つからなかった場合は先頭のものを送信
+            if not target_item:
+                target_item = raw_items[0]
+
+            title, url, img_url, keyword = target_item
             item_key = generate_key(url, title)
             new_items.append((item_key, title, url, img_url, keyword))
-            print(f"★テスト送信モード稼働中: 先頭1件({title})をテスト送信します。")
+            print(f"★テスト送信モード稼働中: 指定テスト対象({title})を送信します。")
     else:
         for title, url, img_url, keyword in raw_items:
             item_key = generate_key(url, title)
