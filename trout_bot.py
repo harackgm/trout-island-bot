@@ -19,9 +19,10 @@ from linebot.v3.messaging import (
 )
 
 # ==========================================
-# ★昨日の2件テスト送信モード（8/25商品のみ安全送信）
+# ★8/25確認テスト用モード（安全制御・件数上限固定）
 # ==========================================
 TEST_MODE = True
+MAX_NOTIFY_LIMIT = 5  # LINE API上限(12件)を確実に下回る安全枠
 
 CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN', '').strip()
 TARGET_URL = "https://troutisland.shop-pro.jp/"
@@ -52,6 +53,7 @@ def extract_updates(soup):
             href = clean_text(a['href'])
             text = clean_text(a.get_text())
 
+            # 商品詳細ページ(pid=を含む)以外のリンクを除外
             if not href or 'pid=' not in href:
                 continue
 
@@ -61,7 +63,7 @@ def extract_updates(soup):
             
             full_context_text = text + " " + parent_text + " " + grandparent_text
             
-            # ★8/25の商品のみをターゲット抽出
+            # 8/25の記載がある個別商品のみを抽出
             if "8/25" in full_context_text:
                 full_url = urljoin(TARGET_URL, href)
                 
@@ -198,10 +200,12 @@ def main():
         print("8/25の対象データが見つかりませんでした。")
         return
 
-    print(f"★8/25の対象データ {len(raw_items)}件を検出しました。送信処理を行います。")
+    # ★安全対策：LINE APIの上限(12件)を超えないよう最大5件へ制御
+    send_targets = raw_items[:MAX_NOTIFY_LIMIT]
+    print(f"★8/25の対象データ {len(raw_items)}件中、安全枠として{len(send_targets)}件を送信対象とします。")
 
     bubbles = []
-    for title, link, pre_img_url, keyword in raw_items:
+    for title, link, pre_img_url, keyword in send_targets:
         img_url = fetch_product_image(link)
         bubble = create_flex_bubble(title, link, img_url, keyword)
         bubbles.append(bubble)
@@ -212,7 +216,7 @@ def main():
     }
 
     flex_message = FlexMessage(
-        alt_text=f"【8/25確認テスト】({len(raw_items)}件)",
+        alt_text=f"【8/25確認テスト】({len(send_targets)}件)",
         contents=FlexContainer.from_dict(flex_container_dict)
     )
 
@@ -224,7 +228,7 @@ def main():
             broadcast_request = BroadcastRequest(messages=[flex_message])
             line_bot_api.broadcast(broadcast_request)
         
-        print(f"★8/25のデータ {len(raw_items)}件をカルーセル形式で正常送信しました。")
+        print(f"★8/25のデータ {len(send_targets)}件をカルーセル形式で正常送信しました。")
 
     except Exception as e:
         print(f"★送信エラー: {e}")
