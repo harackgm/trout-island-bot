@@ -93,7 +93,8 @@ def extract_updates(soup):
             href = clean_text(a['href'])
             text = clean_text(a.get_text())
 
-            if not href or 'mode=cate' in href or 'cart' in href or 'myaccount' in href or href in ['/', '#']:
+            # ★修正: 商品詳細ページ(pid=を含む)以外のリンク（カテゴリーリンクやサイドバーのバナー等）を完全除外
+            if not href or 'pid=' not in href:
                 continue
 
             parent_tag = a.parent
@@ -109,7 +110,7 @@ def extract_updates(soup):
             has_date = bool(re.search(r'\d{1,2}/\d{1,2}', full_context_text))
             is_reservation = ("予約" in full_context_text or "ご予約" in full_context_text)
 
-            if (has_date or is_reservation) and ('pid=' in href or 'shop-pro.jp' in href):
+            if has_date or is_reservation:
                 full_url = urljoin(TARGET_URL, href)
                 
                 status_keyword = "更新・お知らせ"
@@ -203,10 +204,6 @@ def extract_sale_items():
     return items
 
 def fetch_product_image(product_url):
-    """
-    ショップの裏側設定(og:image)のミスを回避するため、
-    ページ上の本物の商品画像を最優先で探し出すよう改良
-    """
     if not product_url:
         return None
     try:
@@ -217,14 +214,12 @@ def fetch_product_image(product_url):
         
         img_url = None
         
-        # 1. ページ内の「/product/」を含む画像を最優先で探す（本物の商品画像である確率が最も高い）
         for img in soup.find_all('img'):
             src = img.get('src', '')
             if '/product/' in src and not 'icon' in src and not 'spacer' in src:
                 img_url = src
                 break
                 
-        # 2. 見つからなかった場合のみ、予備として従来の og:image を使用する
         if not img_url:
             og_img = soup.find("meta", property="og:image")
             if og_img and og_img.get("content"):
@@ -360,7 +355,7 @@ def main():
             title, url, img_url, keyword = raw_items[0]
             item_key = generate_key(url, title)
             new_items.append((item_key, title, url, img_url, keyword))
-            print("★テスト送信モード稼働中: 先頭1件のみテスト送信します。")
+            print(f"★テスト送信モード稼働中: 先頭1件({title})をテスト送信します。")
     else:
         for title, url, img_url, keyword in raw_items:
             item_key = generate_key(url, title)
@@ -372,7 +367,6 @@ def main():
         print("「新入荷＆在庫更新情報」および「ご予約コーナー」の新しい更新はありませんでした。")
         return
 
-    # ★大量通知ストッパー（安全装置）
     if not TEST_MODE and len(new_items) > MAX_NOTIFY_LIMIT:
         print(f"★安全装置発動: 新着が{len(new_items)}件（上限{MAX_NOTIFY_LIMIT}件超え）のため、大量通知を防ぐべくDBのみ更新します。")
         mark_as_seen(all_current_items)
