@@ -19,9 +19,9 @@ from linebot.v3.messaging import (
 )
 
 # ==========================================
-# ★テスト送信モード（True: イエローウルフ狙い撃ちテスト）
+# ★本番モード設定（False: 通常自動監視 / 新着のみ通知）
 # ==========================================
-TEST_MODE = True
+TEST_MODE = False
 MAX_NOTIFY_LIMIT = 5
 
 CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN', '').strip()
@@ -93,6 +93,7 @@ def extract_updates(soup):
             href = clean_text(a['href'])
             text = clean_text(a.get_text())
 
+            # ★商品詳細ページ(pid=を含む)以外のリンクを完全除外
             if not href or 'pid=' not in href:
                 continue
 
@@ -203,6 +204,10 @@ def extract_sale_items():
     return items
 
 def fetch_product_image(product_url):
+    """
+    ショップの裏側設定(og:image)のミスを回避するため、
+    ページ上の本物の商品画像を最優先で探し出すよう改良
+    """
     if not product_url:
         return None
     try:
@@ -213,12 +218,14 @@ def fetch_product_image(product_url):
         
         img_url = None
         
+        # 1. ページ内の「/product/」を含む画像を最優先で探す（本物の商品画像である確率が最も高い）
         for img in soup.find_all('img'):
             src = img.get('src', '')
             if '/product/' in src and not 'icon' in src and not 'spacer' in src:
                 img_url = src
                 break
                 
+        # 2. 見つからなかった場合のみ、予備として従来の og:image を使用する
         if not img_url:
             og_img = soup.find("meta", property="og:image")
             if og_img and og_img.get("content"):
@@ -351,21 +358,10 @@ def main():
 
     if TEST_MODE:
         if raw_items:
-            # ★イエローウルフを強制的に探し出すスナイパー処理
-            target_item = None
-            for item in raw_items:
-                if "イエローウルフ" in item[0]:
-                    target_item = item
-                    break
-            
-            # 見つからなかった場合は先頭のものを送信
-            if not target_item:
-                target_item = raw_items[0]
-
-            title, url, img_url, keyword = target_item
+            title, url, img_url, keyword = raw_items[0]
             item_key = generate_key(url, title)
             new_items.append((item_key, title, url, img_url, keyword))
-            print(f"★テスト送信モード稼働中: 指定テスト対象({title})を送信します。")
+            print(f"★テスト送信モード稼働中: 先頭1件({title})をテスト送信します。")
     else:
         for title, url, img_url, keyword in raw_items:
             item_key = generate_key(url, title)
@@ -377,6 +373,7 @@ def main():
         print("「新入荷＆在庫更新情報」および「ご予約コーナー」の新しい更新はありませんでした。")
         return
 
+    # ★大量通知ストッパー（安全装置）
     if not TEST_MODE and len(new_items) > MAX_NOTIFY_LIMIT:
         print(f"★安全装置発動: 新着が{len(new_items)}件（上限{MAX_NOTIFY_LIMIT}件超え）のため、大量通知を防ぐべくDBのみ更新します。")
         mark_as_seen(all_current_items)
