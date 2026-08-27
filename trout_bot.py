@@ -6,6 +6,7 @@ import re
 import hashlib
 import urllib.parse
 from urllib.parse import urljoin
+from datetime import datetime, timezone, timedelta
 from bs4 import BeautifulSoup, Comment
 
 # LINE Messaging API v3
@@ -19,10 +20,13 @@ from linebot.v3.messaging import (
 )
 
 # ==========================================
-# ★本番自動監視モード設定（大量通知ストッパー常時稼働）
+# ★本番自動監視モード設定（安全ガードレール常時作動）
 # ==========================================
 TEST_MODE = False
-MAX_NOTIFY_LIMIT = 5
+MAX_NOTIFY_LIMIT = 5  # 大量通知ストッパー（最大5件）
+
+# 日本時間(JST)の定義（GitHub Actions環境対応）
+JST = timezone(timedelta(hours=9))
 
 CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN', '').strip()
 TARGET_URL = "https://troutisland.shop-pro.jp/"
@@ -37,7 +41,7 @@ def init_db():
             item_key TEXT PRIMARY KEY,
             url TEXT,
             title TEXT,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            created_at TEXT
         )
     ''')
     conn.commit()
@@ -47,6 +51,7 @@ def init_db():
     return count == 0
 
 def generate_key(url, title):
+    # URLとタイトルを組み合わせた固有のハッシュキーを生成（おすすめ商品・日付なしも正確に識別）
     raw_str = f"{url}_{title}"
     return hashlib.md5(raw_str.encode('utf-8')).hexdigest()
 
@@ -61,8 +66,10 @@ def is_seen(item_key):
 def mark_as_seen(items):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
+    now_jst = datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')
     for item_key, url, title in items:
-        c.execute('INSERT OR IGNORE INTO seen_items (item_key, url, title) VALUES (?, ?, ?)', (item_key, url, title))
+        c.execute('INSERT OR IGNORE INTO seen_items (item_key, url, title, created_at) VALUES (?, ?, ?, ?)', 
+                  (item_key, url, title, now_jst))
     conn.commit()
     conn.close()
 
@@ -75,73 +82,89 @@ def clean_text(text):
 
 def extract_updates(soup):
     items = []
-    target_box = None
+    target_boxes = []
     
-    # 1. 「<!--ここから入荷情報-->」の直下にあるスクロール枠(div)をピンポイント特定
-    comments = soup.find_all(string=lambda text: isinstance(text, Comment) and "ここから入荷情報" in text)
-    if comments:
-        target_box = comments[0].find_next('div')
+    # 1. 「<!--ここからご予約-->」および「<!--ここから入荷情報-->」の直下にあるスクロール枠を取得
+    comments = soup.find_all(string=lambda text: isinstance(text, Comment))
+    for c in comments:
+        if "ここからご予約" in c or "ここから入荷情報" in c:
+            box = c.find_next('div')
+            if box and box not in target_boxes:
+                target_boxes.append(box)
 
-    # 保険：コメントが見つからない場合は属性で特定
-    if not target_box:
-        target_box = soup.find('div', style=lambda s: s and 'overflow-y' in s)
+    if not target_boxes:
+        target_boxes = soup.find_all('div', style=lambda s: s and 'overflow-y' in s)
 
-    if not target_box:
-        print("入荷情報エリアが検出できませんでした。")
-        return []
+    # 2. 各スクロール枠内のHTMLを<br>タグで1行ずつ分解して抽出
+    for target_box in target_boxes:
+        box_html = str(target_box)
+        raw_lines = re.split(r'<br\s*/?>', box_html, flags=re.IGNORECASE)
 
-    # 2. スクロール枠内のHTMLを<br>タグで1行ずつ厳密に分解
-    box_html = str(target_box)
-    raw_lines = re.split(r'<br\s*/?>', box_html, flags=re.IGNORECASE)
+        for raw_line in raw_lines:
+            line_soup = BeautifulSoup(raw_line, 'html.parser')
+            
+            a_tag = line_soup.find('a', href=True)
+            if not a_tag:
+                continue
 
-    for raw_line in raw_lines:
-        line_soup = BeautifulSoup(raw_line, 'html.parser')
-        
-        # 1行の中に含まれる商品詳細リンク(pid=)を取得
-        a_tag = line_soup.find('a', href=True)
+            href = clean_text(a_tag['href'])
+            if 'pid=' not in href:
+                continue
+
+            full_url = urljoin(TARGET_URL, href)
+            link_text = clean_text(a_tag.get_text())
+            line_full_text = clean_text(line_soup.get_text())
+
+            if "ご予約" in line_full_text or "予約" in line_full_text:
+                status_keyword = "ご予約開始！"
+            elif "新色" in line_full_text:
+                status_keyword = "新色追加！"
+            elif "新入荷" in line_full_text:
+                status_keyword = "新入荷！"
+            elif "再入荷" in line_full_text or "在庫更新" in line_full_text:
+                status_keyword = "再入荷！"
+            else:
+                status_keyword = "更新・お知らせ"
+
+            clean_title = link_text
+            if len(clean_title) < 3:
+                temp_title = re.sub(r'\d{1,2}/\d{1,2}', '', line_full_text)
+                temp_title = re.sub(r'ご予約受付中！*|新入荷！*|再入荷！*|在庫更新！*|新色追加！*|！', '', temp_title).strip()
+                if len(temp_title) >= 3:
+                    clean_title = temp_title
+
+            if len(clean_title) > 2:
+                items.append((clean_title, full_url, None, status_keyword))
+
+    return items
+
+def extract_recommend_items(soup):
+    """おすすめ商品（class='product_item'）の解析抽出関数"""
+    items = []
+    product_items = soup.find_all('div', class_='product_item')
+    
+    for item_div in product_items:
+        a_tag = item_div.find('a', href=True)
         if not a_tag:
             continue
-
+            
         href = clean_text(a_tag['href'])
         if 'pid=' not in href:
             continue
 
         full_url = urljoin(TARGET_URL, href)
-        link_text = clean_text(a_tag.get_text())
-        line_full_text = clean_text(line_soup.get_text())
-
-        # 3. 1行内のキーワードのみでステータスを判定
-        if "ご予約" in line_full_text or "予約" in line_full_text:
-            status_keyword = "ご予約開始！"
-        elif "新色" in line_full_text:
-            status_keyword = "新色追加！"
-        elif "新入荷" in line_full_text:
-            status_keyword = "新入荷！"
-        elif "再入荷" in line_full_text or "在庫更新" in line_full_text:
-            status_keyword = "再入荷！"
+        
+        # タイトルの取得（div.name 内のリンクテキストを優先）
+        name_div = item_div.find('div', class_='name')
+        if name_div and name_div.find('a'):
+            title = clean_text(name_div.find('a').get_text())
         else:
-            status_keyword = "更新・お知らせ"
+            title = clean_text(a_tag.get_text())
 
-        # 4. タイトル整形
-        clean_title = link_text
-        if len(clean_title) < 3:
-            temp_title = re.sub(r'\d{1,2}/\d{1,2}', '', line_full_text)
-            temp_title = re.sub(r'ご予約受付中！*|新入荷！*|再入荷！*|在庫更新！*|新色追加！*|！', '', temp_title).strip()
-            if len(temp_title) >= 3:
-                clean_title = temp_title
+        if len(title) > 2:
+            items.append((title, full_url, None, "おすすめ商品！"))
 
-        if len(clean_title) > 2:
-            items.append((clean_title, full_url, None, status_keyword))
-
-    # 重複URLの排除
-    unique_items = []
-    seen_urls = set()
-    for item in items:
-        if item[1] not in seen_urls:
-            unique_items.append(item)
-            seen_urls.add(item[1])
-
-    return unique_items
+    return items
 
 def extract_sale_items():
     items = []
@@ -227,7 +250,7 @@ def create_flex_bubble(title, link, img_url, keyword):
         keyword_color = "#FF4500"
     elif keyword == "再入荷！":
         keyword_color = "#32CD32"
-    elif keyword == "特価コーナー！":
+    elif keyword in ["特価コーナー！", "おすすめ商品！"]:
         keyword_color = "#FF0000" 
     elif keyword == "新色追加！":
         keyword_color = "#9400D3"
@@ -315,15 +338,25 @@ def main():
         print(f"サイトアクセスエラー: {e}")
         return
 
-    raw_items = extract_updates(soup)
+    # 全監視ターゲット（入荷情報・ご予約・おすすめ商品）の一括収集
+    raw_items = extract_updates(soup) + extract_recommend_items(soup)
     
     clean_site_text = clean_text(soup.get_text())
     if "特価" in clean_site_text:
         sale_items = extract_sale_items()
         raw_items = raw_items + sale_items 
 
-    all_current_items = [(generate_key(url, title), url, title) for title, url, img_url, keyword in raw_items]
+    # 重複URLの最終除外
+    unique_raw_items = []
+    seen_urls_check = set()
+    for item in raw_items:
+        if item[1] not in seen_urls_check:
+            unique_raw_items.append(item)
+            seen_urls_check.add(item[1])
 
+    all_current_items = [(generate_key(url, title), url, title) for title, url, img_url, keyword in unique_raw_items]
+
+    # ★初回起動時（DB初期作成時）は全件を既読登録し、通知なしで安全終了
     if is_first_run:
         mark_as_seen(all_current_items)
         print(f"★初回セットアップ完了: 過去データ {len(all_current_items)}件をDB登録しました。")
@@ -332,17 +365,17 @@ def main():
     new_items = []
     seen_keys = set()
 
-    for title, url, img_url, keyword in raw_items:
+    for title, url, img_url, keyword in unique_raw_items:
         item_key = generate_key(url, title)
         if item_key not in seen_keys and not is_seen(item_key):
             seen_keys.add(item_key)
             new_items.append((item_key, title, url, img_url, keyword))
 
     if not new_items:
-        print("「新入荷＆在庫更新情報」および「ご予約コーナー」の新しい更新はありませんでした。")
+        print("「新入荷＆在庫更新情報」「ご予約コーナー」「おすすめ商品」の新しい更新はありませんでした。")
         return
 
-    # ★大量通知ストッパー（安全装置）：未読が5件を超える場合はLINE送信を行わず、全件DBのみ更新
+    # ★大量通知ストッパー（安全装置）：未読が6件以上の場合はLINE送信を行わず全件DBのみ更新
     if len(new_items) > MAX_NOTIFY_LIMIT:
         print(f"★安全装置発動: 新着が{len(new_items)}件（上限{MAX_NOTIFY_LIMIT}件超え）のため、大量通知を防ぐべくDBのみ更新します。")
         mark_as_seen(all_current_items)
@@ -378,7 +411,8 @@ def main():
             broadcast_request = BroadcastRequest(messages=[flex_message])
             line_bot_api.broadcast(broadcast_request)
         
-        print(f"★全登録者へ {len(send_targets)}件をFlex Message形式で正常送信しました。")
+        now_str = datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')
+        print(f"[{now_str} JST] ★全登録者へ {len(send_targets)}件をFlex Message形式で正常送信しました。")
         mark_as_seen(all_current_items)
 
     except Exception as e:
