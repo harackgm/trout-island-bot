@@ -88,12 +88,11 @@ def extract_updates(soup):
     if not target_div:
         target_div = soup.find('div', style=lambda s: s and 'overflow-y: scroll' in s and 'FFF5EE' in s)
 
-    # それでも見つからない場合は、誤検知を防ぐため処理を中断
     if not target_div:
         print("入荷情報の枠が見つかりませんでした。")
         return []
 
-    # 3. 指定枠（target_div）の中だけにあるリンクを抽出
+    # 3. 指定枠の中にあるリンクを抽出し、前後の<br>までのテキストだけを解析する
     a_tags = target_div.find_all('a', href=True)
     extracted_texts = set()
     
@@ -104,15 +103,43 @@ def extract_updates(soup):
         if not href or 'pid=' not in href:
             continue
 
-        parent_tag = a.parent
-        parent_text = clean_text(parent_tag.get_text()) if parent_tag else ""
-        full_context_text = text + " " + parent_text
+        # --- <br>区切りの行テキストだけを抽出する安全処理 ---
+        context_parts = []
+        
+        # 前の要素を<br>まで遡る
+        curr = a.previous_sibling
+        while curr:
+            if curr.name == 'br':
+                break
+            if isinstance(curr, str):
+                context_parts.insert(0, curr)
+            else:
+                context_parts.insert(0, curr.get_text())
+            curr = curr.previous_sibling
+            
+        context_parts.append(text)
+        
+        # 後の要素を<br>まで進む
+        curr = a.next_sibling
+        while curr:
+            if curr.name == 'br':
+                break
+            if isinstance(curr, str):
+                context_parts.append(curr)
+            else:
+                context_parts.append(curr.get_text())
+            curr = curr.next_sibling
+            
+        full_context_text = clean_text(" ".join(context_parts))
+        # ----------------------------------------------------
         
         display_title = text
-        if len(display_title) < 3 and parent_text:
-            display_title = parent_text
+        if len(display_title) < 3:
+            clean_line = re.sub(r'\d{1,2}/\d{1,2}', '', full_context_text)
+            clean_line = re.sub(r'新入荷|再入荷|在庫更新|新色追加|ご予約受付中|予約', '', clean_line)
+            clean_line = clean_line.replace('！', '').strip()
+            display_title = clean_line if clean_line else text
 
-        # 枠内にあるという時点でほぼ確定だが、日付やキーワードがあるか念のためチェック
         has_date = bool(re.search(r'\d{1,2}/\d{1,2}', full_context_text))
         is_reservation = ("予約" in full_context_text or "ご予約" in full_context_text)
         has_keyword = bool(re.search(r'新入荷|再入荷|在庫更新|新色', full_context_text))
@@ -123,12 +150,12 @@ def extract_updates(soup):
             status_keyword = "更新・お知らせ"
             if "予約" in full_context_text or "ご予約" in full_context_text:
                 status_keyword = "ご予約開始！"
+            elif "新色" in full_context_text:
+                status_keyword = "新色追加！"
             elif "新入荷" in full_context_text:
                 status_keyword = "新入荷！"
             elif "再入荷" in full_context_text:
                 status_keyword = "再入荷！"
-            elif "新色" in full_context_text:
-                status_keyword = "新色追加！"
 
             clean_title = re.sub(r'ご予約受付中！*|新入荷！*|再入荷！*|在庫更新！*|新色追加！*', '', display_title).strip()
             if not clean_title:
@@ -137,6 +164,30 @@ def extract_updates(soup):
             if len(clean_title) > 2:
                 extracted_texts.add(clean_title)
             items.append((clean_title, full_url, None, status_keyword))
+
+    # 枠内のテキスト情報（ネット販売、店頭販売中などリンクがないお知らせ用）
+    lines = target_div.get_text(separator='\n').split('\n')
+    for i, line in enumerate(lines):
+        clean_line = clean_text(line)
+        if not clean_line:
+            continue
+        
+        if "店頭販売中" in clean_line or "ネット販売" in clean_line:
+            if any(ext_text in clean_line for ext_text in extracted_texts):
+                continue
+            
+            title = clean_line
+            if "↑" in clean_line and i > 0:
+                title = clean_text(lines[i-1]) + " " + clean_line
+
+            link = "" 
+            status_keyword = "お知らせ"
+            if "ネット販売" in title:
+                status_keyword = "予告・お知らせ"
+            elif "店頭販売中" in title:
+                status_keyword = "店頭販売中！"
+
+            items.append((title, link, None, status_keyword))
 
     unique_items = []
     seen_titles = set()
@@ -234,6 +285,8 @@ def create_flex_bubble(title, link, img_url, keyword):
         keyword_color = "#32CD32"
     elif keyword == "特価コーナー！":
         keyword_color = "#FF0000" 
+    elif keyword == "新色追加！":
+        keyword_color = "#9400D3"
     elif keyword in ["ご予約開始！", "店頭販売中！", "予告・お知らせ"]:
         keyword_color = "#FF69B4"
 
