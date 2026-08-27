@@ -60,53 +60,45 @@ def clean_text(text):
 def extract_updates(soup):
     items = []
     
-    # 1. 「新入荷＆在庫更新情報」枠の特定
-    target_box = None
-    for tag in soup.find_all(['td', 'div', 'p']):
+    # 1. 「新入荷＆在庫更新情報」または「ご予約コーナー」を含むブロックを広く探索
+    target_area = None
+    for tag in soup.find_all(['td', 'div', 'p', 'table']):
         text = tag.get_text()
-        if '新入荷＆在庫更新情報' in text:
-            box = tag.find_next('div', style=lambda s: s and 'overflow' in s)
-            if box:
-                target_box = box
+        if '新入荷＆在庫更新情報' in text or 'ご予約コーナー' in text:
+            parent = tag.find_parent(['td', 'div', 'table'])
+            if parent:
+                target_area = parent
                 break
 
-    if not target_box:
-        target_box = soup.find('div', style=lambda s: s and 'overflow-y: scroll' in s)
+    if not target_area:
+        target_area = soup
 
-    if not target_box:
-        print("更新情報枠が見つかりませんでした。")
-        return []
-
-    # 2. 枠内のHTMLを<br>で行ごとに分解（他行のキーワード誤入力を100%防止）
-    box_html = str(target_box)
-    raw_lines = re.split(r'<br\s*/?>', box_html, flags=re.IGNORECASE)
-
-    for raw_line in raw_lines:
-        line_soup = BeautifulSoup(raw_line, 'html.parser')
-        line_text = clean_text(line_soup.get_text())
-        
-        if not line_text:
-            continue
-
-        a_tag = line_soup.find('a', href=True)
-        if not a_tag:
-            continue
-
-        href = clean_text(a_tag['href'])
+    # 2. 領域内の商品詳細リンク(pid=を含むaタグ)を精査
+    for a in target_area.find_all('a', href=True):
+        href = clean_text(a['href'])
         if 'pid=' not in href:
             continue
 
         full_url = urljoin(TARGET_URL, href)
-        link_text = clean_text(a_tag.get_text())
+        link_text = clean_text(a.get_text())
 
-        # 日付(MM/DD)または予約表記がある行のみ抽出
+        # ★同一行の直前・直後テキストだけを取得（他行の「ご予約」や「針子」の混入を防止）
+        prev_node = a.previous_sibling
+        next_node = a.next_sibling
+        
+        prev_str = clean_text(prev_node if isinstance(prev_node, str) else (prev_node.get_text() if prev_node else ""))
+        next_str = clean_text(next_node if isinstance(next_node, str) else (next_node.get_text() if next_node else ""))
+        
+        line_text = f"{prev_str} {link_text} {next_str}"
+
+        # 日付(MM/DD)または予約表記がある場合のみ対象とする
         has_date = bool(re.search(r'\d{1,2}/\d{1,2}', line_text))
         is_reservation = ("予約" in line_text or "ご予約" in line_text)
 
         if not (has_date or is_reservation):
             continue
 
-        # 同じ行のテキストだけからステータス判定
+        # 同一行のキーワードのみで正確に判定
         if "ご予約" in line_text or "予約" in line_text:
             status_keyword = "ご予約開始！"
         elif "新色" in line_text:
@@ -266,7 +258,7 @@ def main():
     raw_items = extract_updates(soup)
     print(f"★抽出件数: {len(raw_items)}件")
 
-    # ガード1: 送信対象が0件の場合はLINE APIを呼び出さずに安全終了
+    # 送信対象が0件の場合はLINE APIを呼び出さずに安全終了
     if not raw_items:
         print("送信対象の商品が見つかりませんでした。処理を安全に終了します。")
         return
@@ -279,7 +271,6 @@ def main():
         bubble = create_flex_bubble(title, link, img_url, keyword)
         bubbles.append(bubble)
 
-    # ガード2: メッセージが0件の場合はAPIを絶対に叩かない
     if not bubbles:
         print("メッセージバブルの作成結果が0件のため、送信をスキップします。")
         return
@@ -290,7 +281,7 @@ def main():
     }
 
     flex_message = FlexMessage(
-        alt_text=f"【動作テスト】({len(bubbles)}件)",
+        alt_text=f"【動作検証テスト】({len(bubbles)}件)",
         contents=FlexContainer.from_dict(flex_container_dict)
     )
 
