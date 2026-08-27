@@ -6,7 +6,7 @@ import re
 import hashlib
 import urllib.parse
 from urllib.parse import urljoin
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Comment
 
 # LINE Messaging API v3
 from linebot.v3.messaging import (
@@ -19,7 +19,7 @@ from linebot.v3.messaging import (
 )
 
 # ==========================================
-# ★本番自動監視モード設定
+# ★本番自動監視モード設定（大量通知ストッパー常時稼働）
 # ==========================================
 TEST_MODE = False
 MAX_NOTIFY_LIMIT = 5
@@ -75,82 +75,68 @@ def clean_text(text):
 
 def extract_updates(soup):
     items = []
-    target_blocks = []
+    target_div = None
     
-    for tag in soup.find_all(['td', 'div', 'p', 'table']):
-        text = tag.get_text()
-        if ('新入荷' in text or '在庫更新' in text or 'ご予約' in text or '予約' in text) and not ('オススメ' in text or 'おすすめ' in text):
-            target_blocks.append(tag)
+    # 1. ユーザー指定の「<!--ここから入荷情報-->」をピンポイントで探す
+    comments = soup.find_all(string=lambda text: isinstance(text, Comment))
+    for c in comments:
+        if "ここから入荷情報" in c:
+            target_div = c.find_next('div')
+            break
 
-    if not target_blocks:
-        target_blocks = [soup]
+    # 2. 見つからなかった場合の保険（枠のスタイル特徴で探す）
+    if not target_div:
+        target_div = soup.find('div', style=lambda s: s and 'overflow-y: scroll' in s and 'FFF5EE' in s)
 
-    for block in target_blocks:
-        a_tags = block.find_all('a', href=True)
-        extracted_texts = set()
+    # それでも見つからない場合は、誤検知を防ぐため処理を中断
+    if not target_div:
+        print("入荷情報の枠が見つかりませんでした。")
+        return []
+
+    # 3. 指定枠（target_div）の中だけにあるリンクを抽出
+    a_tags = target_div.find_all('a', href=True)
+    extracted_texts = set()
+    
+    for a in a_tags:
+        href = clean_text(a['href'])
+        text = clean_text(a.get_text())
+
+        if not href or 'pid=' not in href:
+            continue
+
+        parent_tag = a.parent
+        parent_text = clean_text(parent_tag.get_text()) if parent_tag else ""
+        full_context_text = text + " " + parent_text
         
-        for a in a_tags:
-            href = clean_text(a['href'])
-            text = clean_text(a.get_text())
+        display_title = text
+        if len(display_title) < 3 and parent_text:
+            display_title = parent_text
 
-            # 商品詳細ページ(pid=を含む)以外のリンク（カテゴリー一覧・バナー等）を完全除外
-            if not href or 'pid=' not in href:
-                continue
+        # 枠内にあるという時点でほぼ確定だが、日付やキーワードがあるか念のためチェック
+        has_date = bool(re.search(r'\d{1,2}/\d{1,2}', full_context_text))
+        is_reservation = ("予約" in full_context_text or "ご予約" in full_context_text)
+        has_keyword = bool(re.search(r'新入荷|再入荷|在庫更新|新色', full_context_text))
 
-            parent_tag = a.parent
-            parent_text = clean_text(parent_tag.get_text()) if parent_tag else ""
-            grandparent_text = clean_text(parent_tag.parent.get_text()) if parent_tag and parent_tag.parent else ""
+        if has_date or is_reservation or has_keyword:
+            full_url = urljoin(TARGET_URL, href)
             
-            full_context_text = text + " " + parent_text + " " + grandparent_text
-            
-            display_title = text
-            if len(display_title) < 3 and parent_text:
-                display_title = parent_text
+            status_keyword = "更新・お知らせ"
+            if "予約" in full_context_text or "ご予約" in full_context_text:
+                status_keyword = "ご予約開始！"
+            elif "新入荷" in full_context_text:
+                status_keyword = "新入荷！"
+            elif "再入荷" in full_context_text:
+                status_keyword = "再入荷！"
+            elif "新色" in full_context_text:
+                status_keyword = "新色追加！"
 
-            has_date = bool(re.search(r'\d{1,2}/\d{1,2}', full_context_text))
-            is_reservation = ("予約" in full_context_text or "ご予約" in full_context_text)
+            clean_title = re.sub(r'ご予約受付中！*|新入荷！*|再入荷！*|在庫更新！*|新色追加！*', '', display_title).strip()
+            if not clean_title:
+                clean_title = display_title
 
-            if has_date or is_reservation:
-                full_url = urljoin(TARGET_URL, href)
-                
-                status_keyword = "更新・お知らせ"
-                if "予約" in full_context_text or "ご予約" in full_context_text:
-                    status_keyword = "ご予約開始！"
-                elif "新入荷" in full_context_text:
-                    status_keyword = "新入荷！"
-                elif "再入荷" in full_context_text:
-                    status_keyword = "再入荷！"
-
-                clean_title = re.sub(r'ご予約受付中！*|新入荷！*|再入荷！*|在庫更新！*', '', display_title).strip()
-                if not clean_title:
-                    clean_title = display_title
-
-                if len(clean_title) > 2:
-                    extracted_texts.add(clean_title)
-                items.append((clean_title, full_url, None, status_keyword))
-
-        lines = block.get_text(separator='\n').split('\n')
-        for i, line in enumerate(lines):
-            clean_line = clean_text(line)
-            if not clean_line:
-                continue
-            
-            if "店頭販売中" in clean_line or "ネット販売" in clean_line:
-                if any(ext_text in clean_line for ext_text in extracted_texts):
-                    continue
-                
-                title = clean_line
-                if "↑" in clean_line and i > 0:
-                    title = clean_text(lines[i-1]) + " " + clean_line
-
-                link = "" 
-                status_keyword = "お知らせ"
-                if "ネット販売" in title:
-                    status_keyword = "予告・お知らせ"
-                elif "店頭販売中" in title:
-                    status_keyword = "店頭販売中！"
-
-                items.append((title, link, None, status_keyword))
+            if len(clean_title) > 2:
+                extracted_texts.add(clean_title)
+            items.append((clean_title, full_url, None, status_keyword))
 
     unique_items = []
     seen_titles = set()
@@ -204,10 +190,6 @@ def extract_sale_items():
     return items
 
 def fetch_product_image(product_url):
-    """
-    ショップの裏側設定(og:image)のミスに惑わされず、
-    実際のページ上の本物画像を最優先で取得する2段階構造
-    """
     if not product_url:
         return None
     try:
@@ -218,14 +200,12 @@ def fetch_product_image(product_url):
         
         img_url = None
         
-        # 1. ページ内の「/product/」画像URLを最優先取得
         for img in soup.find_all('img'):
             src = img.get('src', '')
             if '/product/' in src and not 'icon' in src and not 'spacer' in src:
                 img_url = src
                 break
                 
-        # 2. 予備として og:image を使用
         if not img_url:
             og_img = soup.find("meta", property="og:image")
             if og_img and og_img.get("content"):
