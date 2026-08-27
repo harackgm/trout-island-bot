@@ -6,7 +6,7 @@ import re
 import hashlib
 import urllib.parse
 from urllib.parse import urljoin
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Comment
 
 # LINE Messaging API v3
 from linebot.v3.messaging import (
@@ -19,9 +19,9 @@ from linebot.v3.messaging import (
 )
 
 # ==========================================
-# ★動作確認テストモード（安全制御・通数保護）
+# ★本番自動監視モード設定（大量通知ストッパー常時稼働）
 # ==========================================
-TEST_MODE = True
+TEST_MODE = False
 MAX_NOTIFY_LIMIT = 5
 
 CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN', '').strip()
@@ -50,6 +50,22 @@ def generate_key(url, title):
     raw_str = f"{url}_{title}"
     return hashlib.md5(raw_str.encode('utf-8')).hexdigest()
 
+def is_seen(item_key):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('SELECT 1 FROM seen_items WHERE item_key = ?', (item_key,))
+    row = c.fetchone()
+    conn.close()
+    return row is not None
+
+def mark_as_seen(items):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    for item_key, url, title in items:
+        c.execute('INSERT OR IGNORE INTO seen_items (item_key, url, title) VALUES (?, ?, ?)', (item_key, url, title))
+    conn.commit()
+    conn.close()
+
 def clean_text(text):
     if not text:
         return ""
@@ -59,60 +75,57 @@ def clean_text(text):
 
 def extract_updates(soup):
     items = []
+    target_box = None
     
-    # 1. 「新入荷＆在庫更新情報」または「ご予約コーナー」を含むブロックを広く探索
-    target_area = None
-    for tag in soup.find_all(['td', 'div', 'p', 'table']):
-        text = tag.get_text()
-        if '新入荷＆在庫更新情報' in text or 'ご予約コーナー' in text:
-            parent = tag.find_parent(['td', 'div', 'table'])
-            if parent:
-                target_area = parent
-                break
+    # 1. 「<!--ここから入荷情報-->」の直下にあるスクロール枠(div)をピンポイント特定
+    comments = soup.find_all(string=lambda text: isinstance(text, Comment) and "ここから入荷情報" in text)
+    if comments:
+        target_box = comments[0].find_next('div')
 
-    if not target_area:
-        target_area = soup
+    # 保険：コメントが見つからない場合は属性で特定
+    if not target_box:
+        target_box = soup.find('div', style=lambda s: s and 'overflow-y' in s)
 
-    # 2. 領域内の商品詳細リンク(pid=を含むaタグ)を精査
-    for a in target_area.find_all('a', href=True):
-        href = clean_text(a['href'])
+    if not target_box:
+        print("入荷情報エリアが検出できませんでした。")
+        return []
+
+    # 2. スクロール枠内のHTMLを<br>タグで1行ずつ厳密に分解
+    box_html = str(target_box)
+    raw_lines = re.split(r'<br\s*/?>', box_html, flags=re.IGNORECASE)
+
+    for raw_line in raw_lines:
+        line_soup = BeautifulSoup(raw_line, 'html.parser')
+        
+        # 1行の中に含まれる商品詳細リンク(pid=)を取得
+        a_tag = line_soup.find('a', href=True)
+        if not a_tag:
+            continue
+
+        href = clean_text(a_tag['href'])
         if 'pid=' not in href:
             continue
 
         full_url = urljoin(TARGET_URL, href)
-        link_text = clean_text(a.get_text())
+        link_text = clean_text(a_tag.get_text())
+        line_full_text = clean_text(line_soup.get_text())
 
-        # ★同一行の直前・直後テキストだけを取得（他行の「ご予約」や「針子」の混入を防止）
-        prev_node = a.previous_sibling
-        next_node = a.next_sibling
-        
-        prev_str = clean_text(prev_node if isinstance(prev_node, str) else (prev_node.get_text() if prev_node else ""))
-        next_str = clean_text(next_node if isinstance(next_node, str) else (next_node.get_text() if next_node else ""))
-        
-        line_text = f"{prev_str} {link_text} {next_str}"
-
-        # 日付(MM/DD)または予約表記がある場合のみ対象とする
-        has_date = bool(re.search(r'\d{1,2}/\d{1,2}', line_text))
-        is_reservation = ("予約" in line_text or "ご予約" in line_text)
-
-        if not (has_date or is_reservation):
-            continue
-
-        # 同一行のキーワードのみで正確に判定
-        if "ご予約" in line_text or "予約" in line_text:
+        # 3. 1行内のキーワードのみでステータスを判定
+        if "ご予約" in line_full_text or "予約" in line_full_text:
             status_keyword = "ご予約開始！"
-        elif "新色" in line_text:
+        elif "新色" in line_full_text:
             status_keyword = "新色追加！"
-        elif "新入荷" in line_text:
+        elif "新入荷" in line_full_text:
             status_keyword = "新入荷！"
-        elif "再入荷" in line_text or "在庫更新" in line_text:
+        elif "再入荷" in line_full_text or "在庫更新" in line_full_text:
             status_keyword = "再入荷！"
         else:
             status_keyword = "更新・お知らせ"
 
+        # 4. タイトル整形
         clean_title = link_text
         if len(clean_title) < 3:
-            temp_title = re.sub(r'\d{1,2}/\d{1,2}', '', line_text)
+            temp_title = re.sub(r'\d{1,2}/\d{1,2}', '', line_full_text)
             temp_title = re.sub(r'ご予約受付中！*|新入荷！*|再入荷！*|在庫更新！*|新色追加！*|！', '', temp_title).strip()
             if len(temp_title) >= 3:
                 clean_title = temp_title
@@ -120,6 +133,7 @@ def extract_updates(soup):
         if len(clean_title) > 2:
             items.append((clean_title, full_url, None, status_keyword))
 
+    # 重複URLの排除
     unique_items = []
     seen_urls = set()
     for item in items:
@@ -128,6 +142,48 @@ def extract_updates(soup):
             seen_urls.add(item[1])
 
     return unique_items
+
+def extract_sale_items():
+    items = []
+    try:
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        res = requests.get(SALE_URL, headers=headers, timeout=10)
+        res.encoding = res.apparent_encoding
+        soup = BeautifulSoup(res.text, "html.parser")
+        
+        products = {}
+        for a in soup.find_all('a', href=True):
+            href = clean_text(a['href'])
+            if 'pid=' in href:
+                pid_match = re.search(r'pid=(\d+)', href)
+                if pid_match:
+                    pid = pid_match.group(1)
+                    if pid not in products:
+                        products[pid] = {"title": "", "img_url": None}
+                    
+                    text = clean_text(a.get_text())
+                    if text and "SOLD OUT" not in text and not re.fullmatch(r'[\d,]+円.*', text):
+                        if len(text) > len(products[pid]["title"]):
+                            products[pid]["title"] = text
+                        
+                    img_tag = a.find('img')
+                    if img_tag and img_tag.get('src'):
+                        raw_src = img_tag.get('src')
+                        if "spacer" not in raw_src and "icon" not in raw_src:
+                            img_url = urljoin(SALE_URL, raw_src).replace("http://", "https://")
+                            parsed = urllib.parse.urlparse(img_url)
+                            safe_path = urllib.parse.quote(parsed.path)
+                            products[pid]["img_url"] = urllib.parse.urlunparse((parsed.scheme, parsed.netloc, safe_path, parsed.params, parsed.query, parsed.fragment))
+
+        for pid, data in products.items():
+            title = data["title"]
+            img_url = data["img_url"]
+            if title and img_url:
+                items.append((title, SALE_URL, img_url, "特価コーナー！"))
+            
+    except Exception as e:
+        print(f"特価コーナー取得エラー: {e}")
+    return items
 
 def fetch_product_image(product_url):
     if not product_url:
@@ -171,6 +227,8 @@ def create_flex_bubble(title, link, img_url, keyword):
         keyword_color = "#FF4500"
     elif keyword == "再入荷！":
         keyword_color = "#32CD32"
+    elif keyword == "特価コーナー！":
+        keyword_color = "#FF0000" 
     elif keyword == "新色追加！":
         keyword_color = "#9400D3"
     elif keyword in ["ご予約開始！", "店頭販売中！", "予告・お知らせ"]:
@@ -246,42 +304,69 @@ def main():
         print("エラー: Secrets LINE_CHANNEL_ACCESS_TOKEN が設定されていません。")
         sys.exit(1)
 
+    is_first_run = init_db()
+
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     try:
         response = requests.get(TARGET_URL, headers=headers, timeout=10)
         response.encoding = response.apparent_encoding
         soup = BeautifulSoup(response.text, "html.parser")
     except Exception as e:
-        print(f"アクセスエラー: {e}")
+        print(f"サイトアクセスエラー: {e}")
         return
 
     raw_items = extract_updates(soup)
-    print(f"★抽出件数: {len(raw_items)}件")
+    
+    clean_site_text = clean_text(soup.get_text())
+    if "特価" in clean_site_text:
+        sale_items = extract_sale_items()
+        raw_items = raw_items + sale_items 
 
-    # 送信対象が0件の場合はLINE APIを呼び出さずに安全終了
-    if not raw_items:
-        print("送信対象の商品が見つかりませんでした。処理を安全に終了します。")
+    all_current_items = [(generate_key(url, title), url, title) for title, url, img_url, keyword in raw_items]
+
+    if is_first_run:
+        mark_as_seen(all_current_items)
+        print(f"★初回セットアップ完了: 過去データ {len(all_current_items)}件をDB登録しました。")
         return
 
-    send_targets = raw_items[:MAX_NOTIFY_LIMIT]
+    new_items = []
+    seen_keys = set()
 
+    for title, url, img_url, keyword in raw_items:
+        item_key = generate_key(url, title)
+        if item_key not in seen_keys and not is_seen(item_key):
+            seen_keys.add(item_key)
+            new_items.append((item_key, title, url, img_url, keyword))
+
+    if not new_items:
+        print("「新入荷＆在庫更新情報」および「ご予約コーナー」の新しい更新はありませんでした。")
+        return
+
+    # ★大量通知ストッパー（安全装置）：未読が5件を超える場合はLINE送信を行わず、全件DBのみ更新
+    if len(new_items) > MAX_NOTIFY_LIMIT:
+        print(f"★安全装置発動: 新着が{len(new_items)}件（上限{MAX_NOTIFY_LIMIT}件超え）のため、大量通知を防ぐべくDBのみ更新します。")
+        mark_as_seen(all_current_items)
+        return
+
+    send_targets = new_items[:MAX_NOTIFY_LIMIT]
+    
     bubbles = []
-    for title, link, pre_img_url, keyword in send_targets:
-        img_url = fetch_product_image(link)
+    for item_key, title, link, pre_img_url, keyword in send_targets:
+        img_url = pre_img_url
+        if not img_url and link:
+            img_url = fetch_product_image(link)
+            
         bubble = create_flex_bubble(title, link, img_url, keyword)
         bubbles.append(bubble)
-
-    if not bubbles:
-        print("メッセージバブルの作成結果が0件のため、送信をスキップします。")
-        return
 
     flex_container_dict = {
         "type": "carousel",
         "contents": bubbles
     }
 
+    prefix_text = "【新着・在庫更新情報】"
     flex_message = FlexMessage(
-        alt_text=f"【動作検証テスト】({len(bubbles)}件)",
+        alt_text=f"{prefix_text}({len(send_targets)}件)",
         contents=FlexContainer.from_dict(flex_container_dict)
     )
 
@@ -293,10 +378,18 @@ def main():
             broadcast_request = BroadcastRequest(messages=[flex_message])
             line_bot_api.broadcast(broadcast_request)
         
-        print(f"★テスト送信完了: {len(bubbles)}件を正常送信しました。")
+        print(f"★全登録者へ {len(send_targets)}件をFlex Message形式で正常送信しました。")
+        mark_as_seen(all_current_items)
 
     except Exception as e:
-        print(f"★送信エラー: {e}")
+        err_msg = str(e)
+        print(f"★送信エラーが発生しました: {err_msg}")
+        
+        if "monthly limit" in err_msg.lower() or "429" in err_msg:
+            print("【緊急警告】LINEの月間送信上限（200通）に達しました！GitHub Actionsをエラー停止させて通知します。")
+            sys.exit(1)
+        else:
+            print("一時的な通信エラーのため、未読データは次回へ繰り越します。")
 
 if __name__ == "__main__":
     main()
