@@ -6,7 +6,7 @@ import re
 import hashlib
 import urllib.parse
 from urllib.parse import urljoin
-from bs4 import BeautifulSoup, Comment
+from bs4 import BeautifulSoup
 
 # LINE Messaging API v3
 from linebot.v3.messaging import (
@@ -19,9 +19,9 @@ from linebot.v3.messaging import (
 )
 
 # ==========================================
-# ★本番自動監視モード設定（大量通知ストッパー常時稼働）
+# ★8/27確認テストモード（安全制御・通数保護）
 # ==========================================
-TEST_MODE = False
+TEST_MODE = True
 MAX_NOTIFY_LIMIT = 5
 
 CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN', '').strip()
@@ -50,22 +50,6 @@ def generate_key(url, title):
     raw_str = f"{url}_{title}"
     return hashlib.md5(raw_str.encode('utf-8')).hexdigest()
 
-def is_seen(item_key):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('SELECT 1 FROM seen_items WHERE item_key = ?', (item_key,))
-    row = c.fetchone()
-    conn.close()
-    return row is not None
-
-def mark_as_seen(items):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    for item_key, url, title in items:
-        c.execute('INSERT OR IGNORE INTO seen_items (item_key, url, title) VALUES (?, ?, ?)', (item_key, url, title))
-    conn.commit()
-    conn.close()
-
 def clean_text(text):
     if not text:
         return ""
@@ -75,119 +59,62 @@ def clean_text(text):
 
 def extract_updates(soup):
     items = []
-    target_div = None
+    target_blocks = []
     
-    # 1. ユーザー指定の「<!--ここから入荷情報-->」をピンポイントで探す
-    comments = soup.find_all(string=lambda text: isinstance(text, Comment))
-    for c in comments:
-        if "ここから入荷情報" in c:
-            target_div = c.find_next('div')
-            break
+    # 壊れやすいHTMLコメント検索ではなく、親要素ブロックから安全に検索
+    for tag in soup.find_all(['td', 'div', 'p', 'table']):
+        text = tag.get_text()
+        if ('新入荷' in text or '在庫更新' in text or 'ご予約' in text or '予約' in text or '再入荷' in text) and not ('オススメ' in text or 'おすすめ' in text):
+            target_blocks.append(tag)
 
-    # 2. 見つからなかった場合の保険（枠のスタイル特徴で探す）
-    if not target_div:
-        target_div = soup.find('div', style=lambda s: s and 'overflow-y: scroll' in s and 'FFF5EE' in s)
+    if not target_blocks:
+        target_blocks = [soup]
 
-    if not target_div:
-        print("入荷情報の枠が見つかりませんでした。")
-        return []
-
-    # 3. 指定枠の中にあるリンクを抽出し、前後の<br>までのテキストだけを解析する
-    a_tags = target_div.find_all('a', href=True)
-    extracted_texts = set()
-    
-    for a in a_tags:
-        href = clean_text(a['href'])
-        text = clean_text(a.get_text())
-
-        if not href or 'pid=' not in href:
-            continue
-
-        # --- <br>区切りの行テキストだけを抽出する安全処理 ---
-        context_parts = []
+    for block in target_blocks:
+        a_tags = block.find_all('a', href=True)
+        extracted_texts = set()
         
-        # 前の要素を<br>まで遡る
-        curr = a.previous_sibling
-        while curr:
-            if curr.name == 'br':
-                break
-            if isinstance(curr, str):
-                context_parts.insert(0, curr)
-            else:
-                context_parts.insert(0, curr.get_text())
-            curr = curr.previous_sibling
-            
-        context_parts.append(text)
-        
-        # 後の要素を<br>まで進む
-        curr = a.next_sibling
-        while curr:
-            if curr.name == 'br':
-                break
-            if isinstance(curr, str):
-                context_parts.append(curr)
-            else:
-                context_parts.append(curr.get_text())
-            curr = curr.next_sibling
-            
-        full_context_text = clean_text(" ".join(context_parts))
-        # ----------------------------------------------------
-        
-        display_title = text
-        if len(display_title) < 3:
-            clean_line = re.sub(r'\d{1,2}/\d{1,2}', '', full_context_text)
-            clean_line = re.sub(r'新入荷|再入荷|在庫更新|新色追加|ご予約受付中|予約', '', clean_line)
-            clean_line = clean_line.replace('！', '').strip()
-            display_title = clean_line if clean_line else text
+        for a in a_tags:
+            href = clean_text(a['href'])
+            text = clean_text(a.get_text())
 
-        has_date = bool(re.search(r'\d{1,2}/\d{1,2}', full_context_text))
-        is_reservation = ("予約" in full_context_text or "ご予約" in full_context_text)
-        has_keyword = bool(re.search(r'新入荷|再入荷|在庫更新|新色', full_context_text))
-
-        if has_date or is_reservation or has_keyword:
-            full_url = urljoin(TARGET_URL, href)
-            
-            status_keyword = "更新・お知らせ"
-            if "予約" in full_context_text or "ご予約" in full_context_text:
-                status_keyword = "ご予約開始！"
-            elif "新色" in full_context_text:
-                status_keyword = "新色追加！"
-            elif "新入荷" in full_context_text:
-                status_keyword = "新入荷！"
-            elif "再入荷" in full_context_text:
-                status_keyword = "再入荷！"
-
-            clean_title = re.sub(r'ご予約受付中！*|新入荷！*|再入荷！*|在庫更新！*|新色追加！*', '', display_title).strip()
-            if not clean_title:
-                clean_title = display_title
-
-            if len(clean_title) > 2:
-                extracted_texts.add(clean_title)
-            items.append((clean_title, full_url, None, status_keyword))
-
-    # 枠内のテキスト情報（ネット販売、店頭販売中などリンクがないお知らせ用）
-    lines = target_div.get_text(separator='\n').split('\n')
-    for i, line in enumerate(lines):
-        clean_line = clean_text(line)
-        if not clean_line:
-            continue
-        
-        if "店頭販売中" in clean_line or "ネット販売" in clean_line:
-            if any(ext_text in clean_line for ext_text in extracted_texts):
+            if not href or 'pid=' not in href:
                 continue
+
+            parent_tag = a.parent
+            parent_text = clean_text(parent_tag.get_text()) if parent_tag else ""
+            grandparent_text = clean_text(parent_tag.parent.get_text()) if parent_tag and parent_tag.parent else ""
             
-            title = clean_line
-            if "↑" in clean_line and i > 0:
-                title = clean_text(lines[i-1]) + " " + clean_line
+            full_context_text = text + " " + parent_text + " " + grandparent_text
+            
+            display_title = text
+            if len(display_title) < 3 and parent_text:
+                display_title = parent_text
 
-            link = "" 
-            status_keyword = "お知らせ"
-            if "ネット販売" in title:
-                status_keyword = "予告・お知らせ"
-            elif "店頭販売中" in title:
-                status_keyword = "店頭販売中！"
+            has_date = bool(re.search(r'\d{1,2}/\d{1,2}', full_context_text))
+            is_reservation = ("予約" in full_context_text or "ご予約" in full_context_text)
+            has_keyword = bool(re.search(r'新入荷|再入荷|在庫更新|新色', full_context_text))
 
-            items.append((title, link, None, status_keyword))
+            if has_date or is_reservation or has_keyword:
+                full_url = urljoin(TARGET_URL, href)
+                
+                status_keyword = "更新・お知らせ"
+                if "予約" in full_context_text or "ご予約" in full_context_text:
+                    status_keyword = "ご予約開始！"
+                elif "新色" in full_context_text:
+                    status_keyword = "新色追加！"
+                elif "新入荷" in full_context_text:
+                    status_keyword = "新入荷！"
+                elif "再入荷" in full_context_text:
+                    status_keyword = "再入荷！"
+
+                clean_title = re.sub(r'ご予約受付中！*|新入荷！*|再入荷！*|在庫更新！*|新色追加！*', '', display_title).strip()
+                if not clean_title:
+                    clean_title = display_title
+
+                if len(clean_title) > 2:
+                    extracted_texts.add(clean_title)
+                items.append((clean_title, full_url, None, status_keyword))
 
     unique_items = []
     seen_titles = set()
@@ -197,48 +124,6 @@ def extract_updates(soup):
             seen_titles.add(item[0])
 
     return unique_items
-
-def extract_sale_items():
-    items = []
-    try:
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-        res = requests.get(SALE_URL, headers=headers, timeout=10)
-        res.encoding = res.apparent_encoding
-        soup = BeautifulSoup(res.text, "html.parser")
-        
-        products = {}
-        for a in soup.find_all('a', href=True):
-            href = clean_text(a['href'])
-            if 'pid=' in href:
-                pid_match = re.search(r'pid=(\d+)', href)
-                if pid_match:
-                    pid = pid_match.group(1)
-                    if pid not in products:
-                        products[pid] = {"title": "", "img_url": None}
-                    
-                    text = clean_text(a.get_text())
-                    if text and "SOLD OUT" not in text and not re.fullmatch(r'[\d,]+円.*', text):
-                        if len(text) > len(products[pid]["title"]):
-                            products[pid]["title"] = text
-                        
-                    img_tag = a.find('img')
-                    if img_tag and img_tag.get('src'):
-                        raw_src = img_tag.get('src')
-                        if "spacer" not in raw_src and "icon" not in raw_src:
-                            img_url = urljoin(SALE_URL, raw_src).replace("http://", "https://")
-                            parsed = urllib.parse.urlparse(img_url)
-                            safe_path = urllib.parse.quote(parsed.path)
-                            products[pid]["img_url"] = urllib.parse.urlunparse((parsed.scheme, parsed.netloc, safe_path, parsed.params, parsed.query, parsed.fragment))
-
-        for pid, data in products.items():
-            title = data["title"]
-            img_url = data["img_url"]
-            if title and img_url:
-                items.append((title, SALE_URL, img_url, "特価コーナー！"))
-            
-    except Exception as e:
-        print(f"特価コーナー取得エラー: {e}")
-    return items
 
 def fetch_product_image(product_url):
     if not product_url:
@@ -250,7 +135,6 @@ def fetch_product_image(product_url):
         soup = BeautifulSoup(res.text, "html.parser")
         
         img_url = None
-        
         for img in soup.find_all('img'):
             src = img.get('src', '')
             if '/product/' in src and not 'icon' in src and not 'spacer' in src:
@@ -360,8 +244,6 @@ def main():
         print("エラー: Secrets LINE_CHANNEL_ACCESS_TOKEN が設定されていません。")
         sys.exit(1)
 
-    is_first_run = init_db()
-
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     try:
         response = requests.get(TARGET_URL, headers=headers, timeout=10)
@@ -373,45 +255,17 @@ def main():
 
     raw_items = extract_updates(soup)
     
-    clean_site_text = clean_text(soup.get_text())
-    if "特価" in clean_site_text:
-        sale_items = extract_sale_items()
-        raw_items = raw_items + sale_items 
+    # 8/27のターゲット要素（九重ルアーズ/ココニョロ）をフィルタリングテスト
+    target_items = [item for item in raw_items if "ココニョロ" in item[0] or "九重" in item[0]]
+    if not target_items:
+        target_items = raw_items[:2]
 
-    all_current_items = [(generate_key(url, title), url, title) for title, url, img_url, keyword in raw_items]
+    send_targets = target_items[:MAX_NOTIFY_LIMIT]
+    print(f"★抽出成功件数: {len(send_targets)}件")
 
-    if is_first_run:
-        mark_as_seen(all_current_items)
-        print(f"★初回セットアップ完了: 過去データ {len(all_current_items)}件をDB登録しました。")
-        return
-
-    new_items = []
-    seen_keys = set()
-
-    for title, url, img_url, keyword in raw_items:
-        item_key = generate_key(url, title)
-        if item_key not in seen_keys and not is_seen(item_key):
-            seen_keys.add(item_key)
-            new_items.append((item_key, title, url, img_url, keyword))
-
-    if not new_items:
-        print("「新入荷＆在庫更新情報」および「ご予約コーナー」の新しい更新はありませんでした。")
-        return
-
-    # ★大量通知ストッパー（安全装置）: 未読が5件を超える場合はLINE送信を行わず、全件DBのみ更新
-    if len(new_items) > MAX_NOTIFY_LIMIT:
-        print(f"★安全装置発動: 新着が{len(new_items)}件（上限{MAX_NOTIFY_LIMIT}件超え）のため、大量通知を防ぐべくDBのみ更新します。")
-        mark_as_seen(all_current_items)
-        return
-
-    send_targets = new_items[:MAX_NOTIFY_LIMIT]
-    
     bubbles = []
-    for item_key, title, link, pre_img_url, keyword in send_targets:
-        img_url = pre_img_url
-        if not img_url and link:
-            img_url = fetch_product_image(link)
-            
+    for title, link, pre_img_url, keyword in send_targets:
+        img_url = fetch_product_image(link)
         bubble = create_flex_bubble(title, link, img_url, keyword)
         bubbles.append(bubble)
 
@@ -420,9 +274,8 @@ def main():
         "contents": bubbles
     }
 
-    prefix_text = "【新着・在庫更新情報】"
     flex_message = FlexMessage(
-        alt_text=f"{prefix_text}({len(send_targets)}件)",
+        alt_text=f"【8/27テスト送信】({len(send_targets)}件)",
         contents=FlexContainer.from_dict(flex_container_dict)
     )
 
@@ -434,18 +287,10 @@ def main():
             broadcast_request = BroadcastRequest(messages=[flex_message])
             line_bot_api.broadcast(broadcast_request)
         
-        print(f"★全登録者へ {len(send_targets)}件をFlex Message形式で正常送信しました。")
-        mark_as_seen(all_current_items)
+        print(f"★テスト通知完了: {len(send_targets)}件を正常送信しました。")
 
     except Exception as e:
-        err_msg = str(e)
-        print(f"★送信エラーが発生しました: {err_msg}")
-        
-        if "monthly limit" in err_msg.lower() or "429" in err_msg:
-            print("【緊急警告】LINEの月間送信上限（200通）に達しました！GitHub Actionsをエラー停止させて通知します。")
-            sys.exit(1)
-        else:
-            print("一時的な通信エラーのため、未読データは次回へ繰り越します。")
+        print(f"★送信エラー: {e}")
 
 if __name__ == "__main__":
     main()
