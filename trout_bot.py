@@ -19,7 +19,7 @@ from linebot.v3.messaging import (
 )
 
 # ==========================================
-# ★8/27確認テストモード（安全制御・通数保護）
+# ★8/27検証テストモード（安全装置・通数保護）
 # ==========================================
 TEST_MODE = True
 MAX_NOTIFY_LIMIT = 5
@@ -59,69 +59,81 @@ def clean_text(text):
 
 def extract_updates(soup):
     items = []
-    target_blocks = []
     
-    # 壊れやすいHTMLコメント検索ではなく、親要素ブロックから安全に検索
-    for tag in soup.find_all(['td', 'div', 'p', 'table']):
+    # 1. 「新入荷＆在庫更新情報」のスクロール枠をピンポイント特定
+    target_box = None
+    for tag in soup.find_all(['td', 'div', 'p']):
         text = tag.get_text()
-        if ('新入荷' in text or '在庫更新' in text or 'ご予約' in text or '予約' in text or '再入荷' in text) and not ('オススメ' in text or 'おすすめ' in text):
-            target_blocks.append(tag)
+        if '新入荷＆在庫更新情報' in text:
+            box = tag.find_next('div', style=lambda s: s and 'overflow' in s)
+            if box:
+                target_box = box
+                break
 
-    if not target_blocks:
-        target_blocks = [soup]
+    if not target_box:
+        target_box = soup.find('div', style=lambda s: s and 'overflow-y: scroll' in s)
 
-    for block in target_blocks:
-        a_tags = block.find_all('a', href=True)
-        extracted_texts = set()
+    if not target_box:
+        print("更新情報枠が見つかりませんでした。")
+        return []
+
+    # 2. 枠内のHTMLを<br>タグで行ごとに分解（他行のキーワード混入を100%防止）
+    box_html = str(target_box)
+    raw_lines = re.split(r'<br\s*/?>', box_html, flags=re.IGNORECASE)
+
+    for raw_line in raw_lines:
+        line_soup = BeautifulSoup(raw_line, 'html.parser')
+        line_text = clean_text(line_soup.get_text())
         
-        for a in a_tags:
-            href = clean_text(a['href'])
-            text = clean_text(a.get_text())
+        if not line_text:
+            continue
 
-            if not href or 'pid=' not in href:
-                continue
+        a_tag = line_soup.find('a', href=True)
+        if not a_tag:
+            continue
 
-            parent_tag = a.parent
-            parent_text = clean_text(parent_tag.get_text()) if parent_tag else ""
-            grandparent_text = clean_text(parent_tag.parent.get_text()) if parent_tag and parent_tag.parent else ""
-            
-            full_context_text = text + " " + parent_text + " " + grandparent_text
-            
-            display_title = text
-            if len(display_title) < 3 and parent_text:
-                display_title = parent_text
+        href = clean_text(a_tag['href'])
+        if 'pid=' not in href:
+            continue
 
-            has_date = bool(re.search(r'\d{1,2}/\d{1,2}', full_context_text))
-            is_reservation = ("予約" in full_context_text or "ご予約" in full_context_text)
-            has_keyword = bool(re.search(r'新入荷|再入荷|在庫更新|新色', full_context_text))
+        full_url = urljoin(TARGET_URL, href)
+        link_text = clean_text(a_tag.get_text())
 
-            if has_date or is_reservation or has_keyword:
-                full_url = urljoin(TARGET_URL, href)
-                
-                status_keyword = "更新・お知らせ"
-                if "予約" in full_context_text or "ご予約" in full_context_text:
-                    status_keyword = "ご予約開始！"
-                elif "新色" in full_context_text:
-                    status_keyword = "新色追加！"
-                elif "新入荷" in full_context_text:
-                    status_keyword = "新入荷！"
-                elif "再入荷" in full_context_text:
-                    status_keyword = "再入荷！"
+        # 日付(MM/DD)が含まれている行のみ抽出（日付のない「針子」等を完全排除）
+        has_date = bool(re.search(r'\d{1,2}/\d{1,2}', line_text))
+        is_reservation = ("予約" in line_text or "ご予約" in line_text)
 
-                clean_title = re.sub(r'ご予約受付中！*|新入荷！*|再入荷！*|在庫更新！*|新色追加！*', '', display_title).strip()
-                if not clean_title:
-                    clean_title = display_title
+        if not (has_date or is_reservation):
+            continue
 
-                if len(clean_title) > 2:
-                    extracted_texts.add(clean_title)
-                items.append((clean_title, full_url, None, status_keyword))
+        # ★同じ行内のテキストだけから正確にステータスを判定
+        if "ご予約" in line_text or "予約" in line_text:
+            status_keyword = "ご予約開始！"
+        elif "新色" in line_text:
+            status_keyword = "新色追加！"
+        elif "新入荷" in line_text:
+            status_keyword = "新入荷！"
+        elif "再入荷" in line_text or "在庫更新" in line_text:
+            status_keyword = "再入荷！"
+        else:
+            status_keyword = "更新・お知らせ"
+
+        clean_title = link_text
+        if len(clean_title) < 3:
+            temp_title = re.sub(r'\d{1,2}/\d{1,2}', '', line_text)
+            temp_title = re.sub(r'ご予約受付中！*|新入荷！*|再入荷！*|在庫更新！*|新色追加！*|！', '', temp_title).strip()
+            if len(temp_title) >= 3:
+                clean_title = temp_title
+
+        if len(clean_title) > 2:
+            items.append((clean_title, full_url, None, status_keyword))
 
     unique_items = []
-    seen_titles = set()
+    seen_urls = set()
     for item in items:
-        if item[0] not in seen_titles:
+        if item[1] not in seen_urls:
             unique_items.append(item)
-            seen_titles.add(item[0])
+            seen_urls.add(item[1])
 
     return unique_items
 
@@ -167,8 +179,6 @@ def create_flex_bubble(title, link, img_url, keyword):
         keyword_color = "#FF4500"
     elif keyword == "再入荷！":
         keyword_color = "#32CD32"
-    elif keyword == "特価コーナー！":
-        keyword_color = "#FF0000" 
     elif keyword == "新色追加！":
         keyword_color = "#9400D3"
     elif keyword in ["ご予約開始！", "店頭販売中！", "予告・お知らせ"]:
@@ -250,18 +260,18 @@ def main():
         response.encoding = response.apparent_encoding
         soup = BeautifulSoup(response.text, "html.parser")
     except Exception as e:
-        print(f"サイトアクセスエラー: {e}")
+        print(f"アクセスエラー: {e}")
         return
 
     raw_items = extract_updates(soup)
     
-    # 8/27のターゲット要素（九重ルアーズ/ココニョロ）をフィルタリングテスト
+    # 8/27の最新データを優先抽出
     target_items = [item for item in raw_items if "ココニョロ" in item[0] or "九重" in item[0]]
     if not target_items:
         target_items = raw_items[:2]
 
     send_targets = target_items[:MAX_NOTIFY_LIMIT]
-    print(f"★抽出成功件数: {len(send_targets)}件")
+    print(f"★抽出件数: {len(send_targets)}件")
 
     bubbles = []
     for title, link, pre_img_url, keyword in send_targets:
@@ -275,7 +285,7 @@ def main():
     }
 
     flex_message = FlexMessage(
-        alt_text=f"【8/27テスト送信】({len(send_targets)}件)",
+        alt_text=f"【8/27修正検証テスト】({len(send_targets)}件)",
         contents=FlexContainer.from_dict(flex_container_dict)
     )
 
@@ -287,7 +297,7 @@ def main():
             broadcast_request = BroadcastRequest(messages=[flex_message])
             line_bot_api.broadcast(broadcast_request)
         
-        print(f"★テスト通知完了: {len(send_targets)}件を正常送信しました。")
+        print(f"★テスト送信完了: {len(send_targets)}件を正常送信しました。")
 
     except Exception as e:
         print(f"★送信エラー: {e}")
