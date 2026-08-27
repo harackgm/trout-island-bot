@@ -19,7 +19,7 @@ from linebot.v3.messaging import (
 )
 
 # ==========================================
-# ★8/27検証テストモード（安全装置・通数保護）
+# ★動作確認テストモード（安全制御・通数保護）
 # ==========================================
 TEST_MODE = True
 MAX_NOTIFY_LIMIT = 5
@@ -60,7 +60,7 @@ def clean_text(text):
 def extract_updates(soup):
     items = []
     
-    # 1. 「新入荷＆在庫更新情報」のスクロール枠をピンポイント特定
+    # 1. 「新入荷＆在庫更新情報」枠の特定
     target_box = None
     for tag in soup.find_all(['td', 'div', 'p']):
         text = tag.get_text()
@@ -77,7 +77,7 @@ def extract_updates(soup):
         print("更新情報枠が見つかりませんでした。")
         return []
 
-    # 2. 枠内のHTMLを<br>タグで行ごとに分解（他行のキーワード混入を100%防止）
+    # 2. 枠内のHTMLを<br>で行ごとに分解（他行のキーワード誤入力を100%防止）
     box_html = str(target_box)
     raw_lines = re.split(r'<br\s*/?>', box_html, flags=re.IGNORECASE)
 
@@ -99,14 +99,14 @@ def extract_updates(soup):
         full_url = urljoin(TARGET_URL, href)
         link_text = clean_text(a_tag.get_text())
 
-        # 日付(MM/DD)が含まれている行のみ抽出（日付のない「針子」等を完全排除）
+        # 日付(MM/DD)または予約表記がある行のみ抽出
         has_date = bool(re.search(r'\d{1,2}/\d{1,2}', line_text))
         is_reservation = ("予約" in line_text or "ご予約" in line_text)
 
         if not (has_date or is_reservation):
             continue
 
-        # ★同じ行内のテキストだけから正確にステータスを判定
+        # 同じ行のテキストだけからステータス判定
         if "ご予約" in line_text or "予約" in line_text:
             status_keyword = "ご予約開始！"
         elif "新色" in line_text:
@@ -264,14 +264,14 @@ def main():
         return
 
     raw_items = extract_updates(soup)
-    
-    # 8/27の最新データを優先抽出
-    target_items = [item for item in raw_items if "ココニョロ" in item[0] or "九重" in item[0]]
-    if not target_items:
-        target_items = raw_items[:2]
+    print(f"★抽出件数: {len(raw_items)}件")
 
-    send_targets = target_items[:MAX_NOTIFY_LIMIT]
-    print(f"★抽出件数: {len(send_targets)}件")
+    # ガード1: 送信対象が0件の場合はLINE APIを呼び出さずに安全終了
+    if not raw_items:
+        print("送信対象の商品が見つかりませんでした。処理を安全に終了します。")
+        return
+
+    send_targets = raw_items[:MAX_NOTIFY_LIMIT]
 
     bubbles = []
     for title, link, pre_img_url, keyword in send_targets:
@@ -279,13 +279,18 @@ def main():
         bubble = create_flex_bubble(title, link, img_url, keyword)
         bubbles.append(bubble)
 
+    # ガード2: メッセージが0件の場合はAPIを絶対に叩かない
+    if not bubbles:
+        print("メッセージバブルの作成結果が0件のため、送信をスキップします。")
+        return
+
     flex_container_dict = {
         "type": "carousel",
         "contents": bubbles
     }
 
     flex_message = FlexMessage(
-        alt_text=f"【8/27修正検証テスト】({len(send_targets)}件)",
+        alt_text=f"【動作テスト】({len(bubbles)}件)",
         contents=FlexContainer.from_dict(flex_container_dict)
     )
 
@@ -297,7 +302,7 @@ def main():
             broadcast_request = BroadcastRequest(messages=[flex_message])
             line_bot_api.broadcast(broadcast_request)
         
-        print(f"★テスト送信完了: {len(send_targets)}件を正常送信しました。")
+        print(f"★テスト送信完了: {len(bubbles)}件を正常送信しました。")
 
     except Exception as e:
         print(f"★送信エラー: {e}")
