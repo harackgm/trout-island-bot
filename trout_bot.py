@@ -20,10 +20,11 @@ from linebot.v3.messaging import (
 )
 
 # ==========================================
-# ★本番自動監視モード設定（安全ガードレール常時作動）
+# ★本番自動監視モード設定（カルーセル分割＆安全ストッパー作動）
 # ==========================================
 TEST_MODE = False
-MAX_NOTIFY_LIMIT = 5  # 大量通知ストッパー（最大5件）
+MAX_NOTIFY_LIMIT = 15       # 異常時ストッパー：16件以上の新着は送信スキップ
+MAX_BUBBLES_PER_MSG = 5     # 1つの吹き出し(カルーセル)に入れる最大件数
 
 # 日本時間(JST)の定義
 JST = timezone(timedelta(hours=9))
@@ -51,7 +52,6 @@ def init_db():
     return count == 0
 
 def generate_key(url, title, keyword, date_str):
-    # ★修正: 判定キーに「日付(date_str)」を追加。日付が変われば別物として再通知可能に。
     raw_str = f"{url}_{title}_{keyword}_{date_str}"
     return hashlib.md5(raw_str.encode('utf-8')).hexdigest()
 
@@ -113,7 +113,6 @@ def extract_updates(soup):
             link_text = clean_text(a_tag.get_text())
             line_full_text = clean_text(line_soup.get_text())
 
-            # ★修正: 行の中から日付(MM/DD)を抽出。無ければ「no_date」とする
             date_match = re.search(r'\d{1,2}/\d{1,2}', line_full_text)
             date_str = date_match.group(0) if date_match else "no_date"
 
@@ -136,7 +135,6 @@ def extract_updates(soup):
                     clean_title = temp_title
 
             if len(clean_title) > 2:
-                # 抽出データに日付(date_str)を含める
                 items.append((clean_title, full_url, None, status_keyword, date_str))
 
     return items
@@ -163,7 +161,6 @@ def extract_recommend_items(soup):
             title = clean_text(a_tag.get_text())
 
         if len(title) > 2:
-            # おすすめ商品は日付なしとする
             items.append((title, full_url, None, "おすすめ商品！", "no_date"))
 
     return items
@@ -204,7 +201,6 @@ def extract_sale_items():
             title = data["title"]
             img_url = data["img_url"]
             if title and img_url:
-                # 特価コーナーは日付なしとする
                 items.append((title, SALE_URL, img_url, "特価コーナー！", "no_date"))
             
     except Exception as e:
@@ -341,7 +337,6 @@ def main():
         print(f"サイトアクセスエラー: {e}")
         return
 
-    # 抽出結果に日付(date_str)が追加された5要素のタプルが返る
     raw_items = extract_updates(soup) + extract_recommend_items(soup)
     
     clean_site_text = clean_text(soup.get_text())
@@ -356,7 +351,6 @@ def main():
             unique_raw_items.append(item)
             seen_urls_check.add(item[1])
 
-    # ★修正：日付(date_str)を含めてハッシュキーを生成し、全データを照合
     all_current_items = [(generate_key(url, title, keyword, date_str), url, title) for title, url, img_url, keyword, date_str in unique_raw_items]
 
     if is_first_run:
@@ -368,7 +362,6 @@ def main():
     seen_keys = set()
 
     for title, url, img_url, keyword, date_str in unique_raw_items:
-        # 日付を含めて過去の記憶と照合
         item_key = generate_key(url, title, keyword, date_str)
         if item_key not in seen_keys and not is_seen(item_key):
             seen_keys.add(item_key)
@@ -378,44 +371,51 @@ def main():
         print("「新入荷＆在庫更新情報」「ご予約コーナー」「おすすめ商品」の新しい更新はありませんでした。")
         return
 
-    # ★大量通知ストッパー（安全ガードレール）：キー変更に伴い「全商品が新着」と判定されますが、ここで安全にブロックされDBのみ上書きされます。
+    # ★大量通知ストッパー（最大15件を超えたら送信スキップしてDB更新のみ）
     if len(new_items) > MAX_NOTIFY_LIMIT:
         print(f"★安全装置発動: 新着が{len(new_items)}件（上限{MAX_NOTIFY_LIMIT}件超え）のため、大量通知を防ぐべくDBのみ最新基準で更新します。")
         mark_as_seen(all_current_items)
         return
 
-    send_targets = new_items[:MAX_NOTIFY_LIMIT]
+    # 15件以内なら、5件ごとのブロック（チャンク）に分割する
+    chunks = [new_items[i:i + MAX_BUBBLES_PER_MSG] for i in range(0, len(new_items), MAX_BUBBLES_PER_MSG)]
     
-    bubbles = []
-    for item_key, title, link, pre_img_url, keyword, date_str in send_targets:
-        img_url = pre_img_url
-        if not img_url and link:
-            img_url = fetch_product_image(link)
-            
-        bubble = create_flex_bubble(title, link, img_url, keyword)
-        bubbles.append(bubble)
+    flex_messages = []
+    
+    # チャンクごとにFlexMessage(カルーセルの吹き出し)を作成
+    for i, chunk in enumerate(chunks):
+        bubbles = []
+        for item_key, title, link, pre_img_url, keyword, date_str in chunk:
+            img_url = pre_img_url
+            if not img_url and link:
+                img_url = fetch_product_image(link)
+                
+            bubble = create_flex_bubble(title, link, img_url, keyword)
+            bubbles.append(bubble)
 
-    flex_container_dict = {
-        "type": "carousel",
-        "contents": bubbles
-    }
+        flex_container_dict = {
+            "type": "carousel",
+            "contents": bubbles
+        }
 
-    prefix_text = "【新着・在庫更新情報】"
-    flex_message = FlexMessage(
-        alt_text=f"{prefix_text}({len(send_targets)}件)",
-        contents=FlexContainer.from_dict(flex_container_dict)
-    )
+        # 複数吹き出しになる場合、タイトルに何個目かを明記する（VoiceOver/通知用）
+        prefix_text = f"【新着・在庫更新情報】({i+1}/{len(chunks)})" if len(chunks) > 1 else "【新着・在庫更新情報】"
+        flex_messages.append(FlexMessage(
+            alt_text=f"{prefix_text} {len(chunk)}件",
+            contents=FlexContainer.from_dict(flex_container_dict)
+        ))
 
     configuration = Configuration(access_token=CHANNEL_ACCESS_TOKEN)
 
     try:
         with ApiClient(configuration) as api_client:
             line_bot_api = MessagingApi(api_client)
-            broadcast_request = BroadcastRequest(messages=[flex_message])
+            # 作成したFlexMessageのリスト（最大3吹き出し）を1回のAPI呼び出しで同時送信（消費通数:1通）
+            broadcast_request = BroadcastRequest(messages=flex_messages)
             line_bot_api.broadcast(broadcast_request)
         
         now_str = datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')
-        print(f"[{now_str} JST] ★全登録者へ {len(send_targets)}件をFlex Message形式で正常送信しました。")
+        print(f"[{now_str} JST] ★全登録者へ 計{len(new_items)}件（{len(flex_messages)}吹き出し）を正常送信しました。")
         mark_as_seen(all_current_items)
 
     except Exception as e:
