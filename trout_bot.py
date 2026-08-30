@@ -371,18 +371,15 @@ def main():
         print("「新入荷＆在庫更新情報」「ご予約コーナー」「おすすめ商品」の新しい更新はありませんでした。")
         return
 
-    # ★大量通知ストッパー（最大15件を超えたら送信スキップしてDB更新のみ）
     if len(new_items) > MAX_NOTIFY_LIMIT:
         print(f"★安全装置発動: 新着が{len(new_items)}件（上限{MAX_NOTIFY_LIMIT}件超え）のため、大量通知を防ぐべくDBのみ最新基準で更新します。")
         mark_as_seen(all_current_items)
         return
 
-    # 15件以内なら、5件ごとのブロック（チャンク）に分割する
     chunks = [new_items[i:i + MAX_BUBBLES_PER_MSG] for i in range(0, len(new_items), MAX_BUBBLES_PER_MSG)]
     
     flex_messages = []
     
-    # チャンクごとにFlexMessage(カルーセルの吹き出し)を作成
     for i, chunk in enumerate(chunks):
         bubbles = []
         for item_key, title, link, pre_img_url, keyword, date_str in chunk:
@@ -398,7 +395,6 @@ def main():
             "contents": bubbles
         }
 
-        # 複数吹き出しになる場合、タイトルに何個目かを明記する（VoiceOver/通知用）
         prefix_text = f"【新着・在庫更新情報】({i+1}/{len(chunks)})" if len(chunks) > 1 else "【新着・在庫更新情報】"
         flex_messages.append(FlexMessage(
             alt_text=f"{prefix_text} {len(chunk)}件",
@@ -410,7 +406,6 @@ def main():
     try:
         with ApiClient(configuration) as api_client:
             line_bot_api = MessagingApi(api_client)
-            # 作成したFlexMessageのリスト（最大3吹き出し）を1回のAPI呼び出しで同時送信（消費通数:1通）
             broadcast_request = BroadcastRequest(messages=flex_messages)
             line_bot_api.broadcast(broadcast_request)
         
@@ -422,8 +417,9 @@ def main():
         err_msg = str(e)
         print(f"★送信エラーが発生しました: {err_msg}")
         
-        if "monthly limit" in err_msg.lower() or "429" in err_msg:
-            print("【緊急警告】LINEの月間送信上限（200通）に達しました！GitHub Actionsをエラー停止させて通知します。")
+        # ★追加: LINEの月間送信上限（200通）エラーを検知して指定のログを出力
+        if "monthly limit" in err_msg.lower() or "429" in err_msg or "quota" in err_msg.lower():
+            print("[ERROR] 今月分のLINE通知上限（200通）に到達しました。")
             sys.exit(1)
         else:
             print("一時的な通信エラーのため、未読データは次回へ繰り越します。")
