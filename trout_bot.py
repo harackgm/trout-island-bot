@@ -25,7 +25,7 @@ from linebot.v3.messaging import (
 TEST_MODE = False
 MAX_NOTIFY_LIMIT = 5  # 大量通知ストッパー（最大5件）
 
-# 日本時間(JST)の定義（GitHub Actions環境対応）
+# 日本時間(JST)の定義
 JST = timezone(timedelta(hours=9))
 
 CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN', '').strip()
@@ -50,9 +50,9 @@ def init_db():
     conn.close()
     return count == 0
 
-def generate_key(url, title):
-    # URLとタイトルを組み合わせた固有のハッシュキーを生成（おすすめ商品・日付なしも正確に識別）
-    raw_str = f"{url}_{title}"
+def generate_key(url, title, keyword, date_str):
+    # ★修正: 判定キーに「日付(date_str)」を追加。日付が変われば別物として再通知可能に。
+    raw_str = f"{url}_{title}_{keyword}_{date_str}"
     return hashlib.md5(raw_str.encode('utf-8')).hexdigest()
 
 def is_seen(item_key):
@@ -84,7 +84,6 @@ def extract_updates(soup):
     items = []
     target_boxes = []
     
-    # 1. 「<!--ここからご予約-->」および「<!--ここから入荷情報-->」の直下にあるスクロール枠を取得
     comments = soup.find_all(string=lambda text: isinstance(text, Comment))
     for c in comments:
         if "ここからご予約" in c or "ここから入荷情報" in c:
@@ -95,7 +94,6 @@ def extract_updates(soup):
     if not target_boxes:
         target_boxes = soup.find_all('div', style=lambda s: s and 'overflow-y' in s)
 
-    # 2. 各スクロール枠内のHTMLを<br>タグで1行ずつ分解して抽出
     for target_box in target_boxes:
         box_html = str(target_box)
         raw_lines = re.split(r'<br\s*/?>', box_html, flags=re.IGNORECASE)
@@ -114,6 +112,10 @@ def extract_updates(soup):
             full_url = urljoin(TARGET_URL, href)
             link_text = clean_text(a_tag.get_text())
             line_full_text = clean_text(line_soup.get_text())
+
+            # ★修正: 行の中から日付(MM/DD)を抽出。無ければ「no_date」とする
+            date_match = re.search(r'\d{1,2}/\d{1,2}', line_full_text)
+            date_str = date_match.group(0) if date_match else "no_date"
 
             if "ご予約" in line_full_text or "予約" in line_full_text:
                 status_keyword = "ご予約開始！"
@@ -134,12 +136,12 @@ def extract_updates(soup):
                     clean_title = temp_title
 
             if len(clean_title) > 2:
-                items.append((clean_title, full_url, None, status_keyword))
+                # 抽出データに日付(date_str)を含める
+                items.append((clean_title, full_url, None, status_keyword, date_str))
 
     return items
 
 def extract_recommend_items(soup):
-    """おすすめ商品（class='product_item'）の解析抽出関数"""
     items = []
     product_items = soup.find_all('div', class_='product_item')
     
@@ -154,7 +156,6 @@ def extract_recommend_items(soup):
 
         full_url = urljoin(TARGET_URL, href)
         
-        # タイトルの取得（div.name 内のリンクテキストを優先）
         name_div = item_div.find('div', class_='name')
         if name_div and name_div.find('a'):
             title = clean_text(name_div.find('a').get_text())
@@ -162,7 +163,8 @@ def extract_recommend_items(soup):
             title = clean_text(a_tag.get_text())
 
         if len(title) > 2:
-            items.append((title, full_url, None, "おすすめ商品！"))
+            # おすすめ商品は日付なしとする
+            items.append((title, full_url, None, "おすすめ商品！", "no_date"))
 
     return items
 
@@ -202,7 +204,8 @@ def extract_sale_items():
             title = data["title"]
             img_url = data["img_url"]
             if title and img_url:
-                items.append((title, SALE_URL, img_url, "特価コーナー！"))
+                # 特価コーナーは日付なしとする
+                items.append((title, SALE_URL, img_url, "特価コーナー！", "no_date"))
             
     except Exception as e:
         print(f"特価コーナー取得エラー: {e}")
@@ -338,7 +341,7 @@ def main():
         print(f"サイトアクセスエラー: {e}")
         return
 
-    # 全監視ターゲット（入荷情報・ご予約・おすすめ商品）の一括収集
+    # 抽出結果に日付(date_str)が追加された5要素のタプルが返る
     raw_items = extract_updates(soup) + extract_recommend_items(soup)
     
     clean_site_text = clean_text(soup.get_text())
@@ -346,7 +349,6 @@ def main():
         sale_items = extract_sale_items()
         raw_items = raw_items + sale_items 
 
-    # 重複URLの最終除外
     unique_raw_items = []
     seen_urls_check = set()
     for item in raw_items:
@@ -354,9 +356,9 @@ def main():
             unique_raw_items.append(item)
             seen_urls_check.add(item[1])
 
-    all_current_items = [(generate_key(url, title), url, title) for title, url, img_url, keyword in unique_raw_items]
+    # ★修正：日付(date_str)を含めてハッシュキーを生成し、全データを照合
+    all_current_items = [(generate_key(url, title, keyword, date_str), url, title) for title, url, img_url, keyword, date_str in unique_raw_items]
 
-    # ★初回起動時（DB初期作成時）は全件を既読登録し、通知なしで安全終了
     if is_first_run:
         mark_as_seen(all_current_items)
         print(f"★初回セットアップ完了: 過去データ {len(all_current_items)}件をDB登録しました。")
@@ -365,26 +367,27 @@ def main():
     new_items = []
     seen_keys = set()
 
-    for title, url, img_url, keyword in unique_raw_items:
-        item_key = generate_key(url, title)
+    for title, url, img_url, keyword, date_str in unique_raw_items:
+        # 日付を含めて過去の記憶と照合
+        item_key = generate_key(url, title, keyword, date_str)
         if item_key not in seen_keys and not is_seen(item_key):
             seen_keys.add(item_key)
-            new_items.append((item_key, title, url, img_url, keyword))
+            new_items.append((item_key, title, url, img_url, keyword, date_str))
 
     if not new_items:
         print("「新入荷＆在庫更新情報」「ご予約コーナー」「おすすめ商品」の新しい更新はありませんでした。")
         return
 
-    # ★大量通知ストッパー（安全装置）：未読が6件以上の場合はLINE送信を行わず全件DBのみ更新
+    # ★大量通知ストッパー（安全ガードレール）：キー変更に伴い「全商品が新着」と判定されますが、ここで安全にブロックされDBのみ上書きされます。
     if len(new_items) > MAX_NOTIFY_LIMIT:
-        print(f"★安全装置発動: 新着が{len(new_items)}件（上限{MAX_NOTIFY_LIMIT}件超え）のため、大量通知を防ぐべくDBのみ更新します。")
+        print(f"★安全装置発動: 新着が{len(new_items)}件（上限{MAX_NOTIFY_LIMIT}件超え）のため、大量通知を防ぐべくDBのみ最新基準で更新します。")
         mark_as_seen(all_current_items)
         return
 
     send_targets = new_items[:MAX_NOTIFY_LIMIT]
     
     bubbles = []
-    for item_key, title, link, pre_img_url, keyword in send_targets:
+    for item_key, title, link, pre_img_url, keyword, date_str in send_targets:
         img_url = pre_img_url
         if not img_url and link:
             img_url = fetch_product_image(link)
