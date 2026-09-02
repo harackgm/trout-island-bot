@@ -1,9 +1,8 @@
 name: Trout Island Watcher
 
 on:
+  # 外部（Cronjobs等）からの手動・API実行のみを受け付ける
   workflow_dispatch:
-  schedule:
-    - cron: '*/15 * * * *'  # 15分ごとに自動実行
 
 jobs:
   build:
