@@ -53,7 +53,6 @@ def init_db():
     return count == 0
 
 def generate_key(url, title, keyword, date_str):
-    # ★重要：重複判定キーには価格を含めない（過去データの暴発防止）
     raw_str = f"{url}_{title}_{keyword}_{date_str}"
     return hashlib.md5(raw_str.encode('utf-8')).hexdigest()
 
@@ -209,7 +208,6 @@ def extract_sale_items():
         print(f"特価コーナー取得エラー: {e}")
     return items
 
-# ★変更：画像だけでなく価格も同時取得するよう改修
 def fetch_product_details(product_url):
     if not product_url:
         return None, None
@@ -219,7 +217,6 @@ def fetch_product_details(product_url):
         res.encoding = res.apparent_encoding
         soup = BeautifulSoup(res.text, "html.parser")
         
-        # 1. 画像取得
         img_url = None
         for img in soup.find_all('img'):
             src = img.get('src', '')
@@ -242,7 +239,6 @@ def fetch_product_details(product_url):
             safe_path = urllib.parse.quote(parsed.path)
             img_url = urllib.parse.urlunparse((parsed.scheme, parsed.netloc, safe_path, parsed.params, parsed.query, parsed.fragment))
 
-        # 2. 価格取得
         price_text = None
         price_p = soup.find('p', class_='price_detail')
         if price_p:
@@ -260,15 +256,17 @@ def fetch_product_details(product_url):
 
 def create_flex_bubble(title, link, img_url, keyword, price_text=None):
     keyword_color = "#666666"
-    if keyword == "新入荷！":
+    
+    # ★変更点: 結合されたキーワードにも対応できるよう「含む（in）」で判定
+    if "新入荷" in keyword:
         keyword_color = "#FF4500"
-    elif keyword == "再入荷！":
+    elif "再入荷" in keyword:
         keyword_color = "#32CD32"
-    elif keyword in ["特価コーナー！", "おすすめ商品！"]:
+    elif "特価" in keyword or "おすすめ" in keyword:
         keyword_color = "#FF0000" 
-    elif keyword == "新色追加！":
+    elif "新色" in keyword:
         keyword_color = "#9400D3"
-    elif keyword in ["ご予約開始！", "店頭販売中！", "予告・お知らせ"]:
+    elif "予約" in keyword or "店頭" in keyword or "予告" in keyword:
         keyword_color = "#FF69B4"
 
     bubble = {
@@ -284,7 +282,8 @@ def create_flex_bubble(title, link, img_url, keyword, price_text=None):
                     "text": keyword,
                     "color": keyword_color,
                     "size": "sm",
-                    "weight": "bold"
+                    "weight": "bold",
+                    "wrap": True  # キーワードが長くなった場合のための折り返し設定
                 },
                 {
                     "type": "text",
@@ -298,12 +297,11 @@ def create_flex_bubble(title, link, img_url, keyword, price_text=None):
         }
     }
 
-    # ★変更：価格が取得できた場合はタイトル下に追加
     if price_text:
         bubble["body"]["contents"].append({
             "type": "text",
             "text": price_text,
-            "color": "#e60012",  # 赤色で強調
+            "color": "#e60012",
             "size": "sm",
             "weight": "bold",
             "margin": "sm"
@@ -370,12 +368,30 @@ def main():
         sale_items = extract_sale_items()
         raw_items = raw_items + sale_items 
 
-    unique_raw_items = []
-    seen_urls_check = set()
+    # ★変更点: 同一PIDが見つかった場合、キーワードを結合する（新入荷！ ＆ おすすめ商品！）
+    merged_items = {}
     for item in raw_items:
-        if item[1] not in seen_urls_check:
-            unique_raw_items.append(item)
-            seen_urls_check.add(item[1])
+        title, url, img_url, keyword, date_str = item
+        pid_match = re.search(r'pid=(\d+)', url)
+        check_key = pid_match.group(1) if pid_match else url
+        
+        if check_key in merged_items:
+            existing_keyword = merged_items[check_key]['keyword']
+            # キーワードが異なる場合のみ「 ＆ 」で結合する
+            if keyword not in existing_keyword:
+                merged_items[check_key]['keyword'] = f"{existing_keyword} ＆ {keyword}"
+        else:
+            merged_items[check_key] = {
+                'title': title,
+                'url': url,
+                'img_url': img_url,
+                'keyword': keyword,
+                'date_str': date_str
+            }
+
+    unique_raw_items = []
+    for data in merged_items.values():
+        unique_raw_items.append((data['title'], data['url'], data['img_url'], data['keyword'], data['date_str']))
 
     all_current_items = [(generate_key(url, title, keyword, date_str), url, title) for title, url, img_url, keyword, date_str in unique_raw_items]
 
@@ -412,9 +428,8 @@ def main():
             img_url = pre_img_url
             price_text = None
             
-            # ★変更：新着アイテムのみ詳細ページへアクセスし、画像と価格を取得
             if link:
-                time.sleep(1) # サーバー負荷防止のため1秒待機
+                time.sleep(1) 
                 fetched_img, fetched_price = fetch_product_details(link)
                 if not img_url:
                     img_url = fetched_img
