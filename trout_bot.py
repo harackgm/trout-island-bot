@@ -4,6 +4,7 @@ import sqlite3
 import requests
 import re
 import hashlib
+import time
 import urllib.parse
 from urllib.parse import urljoin
 from datetime import datetime, timezone, timedelta
@@ -52,6 +53,7 @@ def init_db():
     return count == 0
 
 def generate_key(url, title, keyword, date_str):
+    # ★重要：重複判定キーには価格を含めない（過去データの暴発防止）
     raw_str = f"{url}_{title}_{keyword}_{date_str}"
     return hashlib.md5(raw_str.encode('utf-8')).hexdigest()
 
@@ -207,15 +209,17 @@ def extract_sale_items():
         print(f"特価コーナー取得エラー: {e}")
     return items
 
-def fetch_product_image(product_url):
+# ★変更：画像だけでなく価格も同時取得するよう改修
+def fetch_product_details(product_url):
     if not product_url:
-        return None
+        return None, None
     try:
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
         res = requests.get(product_url, headers=headers, timeout=5)
         res.encoding = res.apparent_encoding
         soup = BeautifulSoup(res.text, "html.parser")
         
+        # 1. 画像取得
         img_url = None
         for img in soup.find_all('img'):
             src = img.get('src', '')
@@ -237,13 +241,24 @@ def fetch_product_image(product_url):
             parsed = urllib.parse.urlparse(img_url)
             safe_path = urllib.parse.quote(parsed.path)
             img_url = urllib.parse.urlunparse((parsed.scheme, parsed.netloc, safe_path, parsed.params, parsed.query, parsed.fragment))
-            return img_url
+
+        # 2. 価格取得
+        price_text = None
+        price_p = soup.find('p', class_='price_detail')
+        if price_p:
+            price_text = clean_text(price_p.get_text())
+        else:
+            og_price = soup.find("meta", property="product:price:amount")
+            if og_price and og_price.get("content"):
+                price_text = f"{og_price['content']}円"
+
+        return img_url, price_text
 
     except Exception as e:
-        print(f"画像取得エラー ({product_url}): {e}")
-    return None
+        print(f"詳細取得エラー ({product_url}): {e}")
+    return None, None
 
-def create_flex_bubble(title, link, img_url, keyword):
+def create_flex_bubble(title, link, img_url, keyword, price_text=None):
     keyword_color = "#666666"
     if keyword == "新入荷！":
         keyword_color = "#FF4500"
@@ -282,6 +297,17 @@ def create_flex_bubble(title, link, img_url, keyword):
             ]
         }
     }
+
+    # ★変更：価格が取得できた場合はタイトル下に追加
+    if price_text:
+        bubble["body"]["contents"].append({
+            "type": "text",
+            "text": price_text,
+            "color": "#e60012",  # 赤色で強調
+            "size": "sm",
+            "weight": "bold",
+            "margin": "sm"
+        })
 
     if img_url:
         hero_section = {
@@ -384,10 +410,17 @@ def main():
         bubbles = []
         for item_key, title, link, pre_img_url, keyword, date_str in chunk:
             img_url = pre_img_url
-            if not img_url and link:
-                img_url = fetch_product_image(link)
+            price_text = None
+            
+            # ★変更：新着アイテムのみ詳細ページへアクセスし、画像と価格を取得
+            if link:
+                time.sleep(1) # サーバー負荷防止のため1秒待機
+                fetched_img, fetched_price = fetch_product_details(link)
+                if not img_url:
+                    img_url = fetched_img
+                price_text = fetched_price
                 
-            bubble = create_flex_bubble(title, link, img_url, keyword)
+            bubble = create_flex_bubble(title, link, img_url, keyword, price_text)
             bubbles.append(bubble)
 
         flex_container_dict = {
@@ -417,7 +450,6 @@ def main():
         err_msg = str(e)
         print(f"★送信エラーが発生しました: {err_msg}")
         
-        # ★追加: LINEの月間送信上限（200通）エラーを検知して指定のログを出力
         if "monthly limit" in err_msg.lower() or "429" in err_msg or "quota" in err_msg.lower():
             print("[ERROR] 今月分のLINE通知上限（200通）に到達しました。")
             sys.exit(1)
