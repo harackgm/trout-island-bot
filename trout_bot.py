@@ -257,7 +257,6 @@ def fetch_product_details(product_url):
 def create_flex_bubble(title, link, img_url, keyword, price_text=None):
     keyword_color = "#666666"
     
-    # ★変更点: 結合されたキーワードにも対応できるよう「含む（in）」で判定
     if "新入荷" in keyword:
         keyword_color = "#FF4500"
     elif "再入荷" in keyword:
@@ -283,7 +282,7 @@ def create_flex_bubble(title, link, img_url, keyword, price_text=None):
                     "color": keyword_color,
                     "size": "sm",
                     "weight": "bold",
-                    "wrap": True  # キーワードが長くなった場合のための折り返し設定
+                    "wrap": True
                 },
                 {
                     "type": "text",
@@ -368,63 +367,79 @@ def main():
         sale_items = extract_sale_items()
         raw_items = raw_items + sale_items 
 
-    # ★変更点: 同一PIDが見つかった場合、キーワードを結合する（新入荷！ ＆ おすすめ商品！）
-    merged_items = {}
-    for item in raw_items:
-        title, url, img_url, keyword, date_str = item
-        pid_match = re.search(r'pid=(\d+)', url)
-        check_key = pid_match.group(1) if pid_match else url
-        
-        if check_key in merged_items:
-            existing_keyword = merged_items[check_key]['keyword']
-            # キーワードが異なる場合のみ「 ＆ 」で結合する
-            if keyword not in existing_keyword:
-                merged_items[check_key]['keyword'] = f"{existing_keyword} ＆ {keyword}"
-        else:
-            merged_items[check_key] = {
+    # サイト上の全カレントアイテムの個別のキー作成
+    all_current_db_entries = []
+    for title, url, img_url, keyword, date_str in raw_items:
+        key = generate_key(url, title, keyword, date_str)
+        all_current_db_entries.append((key, url, title))
+
+    if is_first_run:
+        mark_as_seen(all_current_db_entries)
+        print(f"★初回セットアップ完了: 過去データ {len(all_current_db_entries)}件をDB登録しました。")
+        return
+
+    # ステップ1: 未読の「個別キー」だけを抽出
+    unseen_items = []
+    for title, url, img_url, keyword, date_str in raw_items:
+        item_key = generate_key(url, title, keyword, date_str)
+        if not is_seen(item_key):
+            pid_match = re.search(r'pid=(\d+)', url)
+            pid = pid_match.group(1) if pid_match else url
+            unseen_items.append({
+                'item_key': item_key,
+                'pid': pid,
                 'title': title,
                 'url': url,
                 'img_url': img_url,
                 'keyword': keyword,
                 'date_str': date_str
-            }
+            })
 
-    unique_raw_items = []
-    for data in merged_items.values():
-        unique_raw_items.append((data['title'], data['url'], data['img_url'], data['keyword'], data['date_str']))
-
-    all_current_items = [(generate_key(url, title, keyword, date_str), url, title) for title, url, img_url, keyword, date_str in unique_raw_items]
-
-    if is_first_run:
-        mark_as_seen(all_current_items)
-        print(f"★初回セットアップ完了: 過去データ {len(all_current_items)}件をDB登録しました。")
-        return
-
-    new_items = []
-    seen_keys = set()
-
-    for title, url, img_url, keyword, date_str in unique_raw_items:
-        item_key = generate_key(url, title, keyword, date_str)
-        if item_key not in seen_keys and not is_seen(item_key):
-            seen_keys.add(item_key)
-            new_items.append((item_key, title, url, img_url, keyword, date_str))
-
-    if not new_items:
+    if not unseen_items:
         print("「新入荷＆在庫更新情報」「ご予約コーナー」「おすすめ商品」の新しい更新はありませんでした。")
         return
 
-    if len(new_items) > MAX_NOTIFY_LIMIT:
-        print(f"★安全装置発動: 新着が{len(new_items)}件（上限{MAX_NOTIFY_LIMIT}件超え）のため、大量通知を防ぐべくDBのみ最新基準で更新します。")
-        mark_as_seen(all_current_items)
+    # ステップ2: 今回の巡回で未読のアイテム同士をPID（商品ID）ごとに結合
+    merged_unseen = {}
+    for item in unseen_items:
+        pid = item['pid']
+        if pid in merged_unseen:
+            if item['keyword'] not in merged_unseen[pid]['keywords']:
+                merged_unseen[pid]['keywords'].append(item['keyword'])
+            merged_unseen[pid]['keys'].append(item['item_key'])
+        else:
+            merged_unseen[pid] = {
+                'title': item['title'],
+                'url': item['url'],
+                'img_url': item['img_url'],
+                'keywords': [item['keyword']],
+                'date_str': item['date_str'],
+                'keys': [item['item_key']]
+            }
+
+    # 通知用リストと送信後にDB保存するキーのリストを作成
+    new_items_to_notify = []
+    all_keys_to_mark = []
+
+    for pid, data in merged_unseen.items():
+        combined_keyword = " ＆ ".join(data['keywords'])
+        new_items_to_notify.append((data['title'], data['url'], data['img_url'], combined_keyword, data['date_str']))
+        for k in data['keys']:
+            all_keys_to_mark.append((k, data['url'], data['title']))
+
+    # ステップ3: 大量通知ストッパーの判定
+    if len(new_items_to_notify) > MAX_NOTIFY_LIMIT:
+        print(f"★安全装置発動: 新着が{len(new_items_to_notify)}件（上限{MAX_NOTIFY_LIMIT}件超え）のため、大量通知を防ぐべくDBのみ最新基準で更新します。")
+        mark_as_seen(all_current_db_entries)
         return
 
-    chunks = [new_items[i:i + MAX_BUBBLES_PER_MSG] for i in range(0, len(new_items), MAX_BUBBLES_PER_MSG)]
-    
+    # ステップ4: カルーセル作成と送信
+    chunks = [new_items_to_notify[i:i + MAX_BUBBLES_PER_MSG] for i in range(0, len(new_items_to_notify), MAX_BUBBLES_PER_MSG)]
     flex_messages = []
     
     for i, chunk in enumerate(chunks):
         bubbles = []
-        for item_key, title, link, pre_img_url, keyword, date_str in chunk:
+        for title, link, pre_img_url, keyword, date_str in chunk:
             img_url = pre_img_url
             price_text = None
             
@@ -458,8 +473,10 @@ def main():
             line_bot_api.broadcast(broadcast_request)
         
         now_str = datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')
-        print(f"[{now_str} JST] ★全登録者へ 計{len(new_items)}件（{len(flex_messages)}吹き出し）を正常送信しました。")
-        mark_as_seen(all_current_items)
+        print(f"[{now_str} JST] ★全登録者へ 計{len(new_items_to_notify)}件（{len(flex_messages)}吹き出し）を正常送信しました。")
+        
+        # 送信に成功したため個別の全キーをDBに保存
+        mark_as_seen(all_keys_to_mark)
 
     except Exception as e:
         err_msg = str(e)
