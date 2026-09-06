@@ -27,6 +27,11 @@ TEST_MODE = False
 MAX_NOTIFY_LIMIT = 15       # 異常時ストッパー：16件以上の新着は送信スキップ
 MAX_BUBBLES_PER_MSG = 5     # 1つの吹き出し(カルーセル)に入れる最大件数
 
+# ★追加: 代替画像URLの設定
+DEFAULT_IMAGE_URL = "https://placehold.jp/333333/ffffff/400x300.png?text=No%20Image"
+# ★追加: 店頭販売用の専用画像URL（GitHubのRawリンク）
+WELCOME_IMAGE_URL = "https://raw.githubusercontent.com/harackgm/trout-island-bot/main/welcome.jpg"
+
 # 日本時間(JST)の定義
 JST = timezone(timedelta(hours=9))
 
@@ -101,18 +106,25 @@ def extract_updates(soup):
 
         for raw_line in raw_lines:
             line_soup = BeautifulSoup(raw_line, 'html.parser')
-            
-            a_tag = line_soup.find('a', href=True)
-            if not a_tag:
-                continue
-
-            href = clean_text(a_tag['href'])
-            if 'pid=' not in href:
-                continue
-
-            full_url = urljoin(TARGET_URL, href)
-            link_text = clean_text(a_tag.get_text())
             line_full_text = clean_text(line_soup.get_text())
+            
+            if len(line_full_text) < 5:
+                continue
+
+            a_tag = line_soup.find('a', href=True)
+            
+            if a_tag:
+                href = clean_text(a_tag['href'])
+                if 'pid=' not in href:
+                    continue
+                full_url = urljoin(TARGET_URL, href)
+                link_text = clean_text(a_tag.get_text())
+            else:
+                if "店頭販売" in line_full_text or "予告" in line_full_text:
+                    full_url = TARGET_URL  
+                    link_text = line_full_text
+                else:
+                    continue
 
             date_match = re.search(r'\d{1,2}/\d{1,2}', line_full_text)
             date_str = date_match.group(0) if date_match else "no_date"
@@ -125,13 +137,15 @@ def extract_updates(soup):
                 status_keyword = "新入荷！"
             elif "再入荷" in line_full_text or "在庫更新" in line_full_text:
                 status_keyword = "再入荷！"
+            elif "店頭販売" in line_full_text:
+                status_keyword = "店頭販売中！"
             else:
                 status_keyword = "更新・お知らせ"
 
             clean_title = link_text
-            if len(clean_title) < 3:
+            if len(clean_title) < 3 or not a_tag:
                 temp_title = re.sub(r'\d{1,2}/\d{1,2}', '', line_full_text)
-                temp_title = re.sub(r'ご予約受付中！*|新入荷！*|再入荷！*|在庫更新！*|新色追加！*|！', '', temp_title).strip()
+                temp_title = re.sub(r'ご予約受付中！*|新入荷！*|再入荷！*|在庫更新！*|新色追加！*|店頭販売開始！*|店頭販売中！*|！', '', temp_title).strip()
                 if len(temp_title) >= 3:
                     clean_title = temp_title
 
@@ -268,6 +282,13 @@ def create_flex_bubble(title, link, img_url, keyword, price_text=None):
     elif "予約" in keyword or "店頭" in keyword or "予告" in keyword:
         keyword_color = "#FF69B4"
 
+    # ★変更: 画像がない場合、店頭販売ならwelcome画像、それ以外はNo Imageを適用
+    if not img_url:
+        if "店頭" in keyword:
+            img_url = WELCOME_IMAGE_URL
+        else:
+            img_url = DEFAULT_IMAGE_URL
+
     bubble = {
         "type": "bubble",
         "size": "kilo", 
@@ -311,17 +332,19 @@ def create_flex_bubble(title, link, img_url, keyword, price_text=None):
             "type": "image",
             "url": img_url,
             "size": "full",
-            "aspectRatio": "1:1",
+            "aspectRatio": "4:3",  # ★変更: 画像比率を4:3に統一
             "aspectMode": "cover"
         }
-        if link:
+        # リンクが存在し、トップページ以外ならタップアクションを追加
+        if link and link != TARGET_URL:
             hero_section["action"] = {
                 "type": "uri",
                 "uri": link
             }
         bubble["hero"] = hero_section
 
-    if link:
+    # リンクが存在し、トップページ以外の個別商品リンクの場合のみボタンを表示
+    if link and link != TARGET_URL:
         bubble["footer"] = {
             "type": "box",
             "layout": "vertical",
@@ -367,7 +390,6 @@ def main():
         sale_items = extract_sale_items()
         raw_items = raw_items + sale_items 
 
-    # サイト上の全カレントアイテムの個別のキー作成
     all_current_db_entries = []
     for title, url, img_url, keyword, date_str in raw_items:
         key = generate_key(url, title, keyword, date_str)
@@ -378,13 +400,12 @@ def main():
         print(f"★初回セットアップ完了: 過去データ {len(all_current_db_entries)}件をDB登録しました。")
         return
 
-    # ステップ1: 未読の「個別キー」だけを抽出
     unseen_items = []
     for title, url, img_url, keyword, date_str in raw_items:
         item_key = generate_key(url, title, keyword, date_str)
         if not is_seen(item_key):
             pid_match = re.search(r'pid=(\d+)', url)
-            pid = pid_match.group(1) if pid_match else url
+            pid = pid_match.group(1) if pid_match else title
             unseen_items.append({
                 'item_key': item_key,
                 'pid': pid,
@@ -399,7 +420,6 @@ def main():
         print("「新入荷＆在庫更新情報」「ご予約コーナー」「おすすめ商品」の新しい更新はありませんでした。")
         return
 
-    # ステップ2: 今回の巡回で未読のアイテム同士をPID（商品ID）ごとに結合
     merged_unseen = {}
     for item in unseen_items:
         pid = item['pid']
@@ -417,7 +437,6 @@ def main():
                 'keys': [item['item_key']]
             }
 
-    # 通知用リストと送信後にDB保存するキーのリストを作成
     new_items_to_notify = []
     all_keys_to_mark = []
 
@@ -427,13 +446,11 @@ def main():
         for k in data['keys']:
             all_keys_to_mark.append((k, data['url'], data['title']))
 
-    # ステップ3: 大量通知ストッパーの判定
     if len(new_items_to_notify) > MAX_NOTIFY_LIMIT:
         print(f"★安全装置発動: 新着が{len(new_items_to_notify)}件（上限{MAX_NOTIFY_LIMIT}件超え）のため、大量通知を防ぐべくDBのみ最新基準で更新します。")
         mark_as_seen(all_current_db_entries)
         return
 
-    # ステップ4: カルーセル作成と送信
     chunks = [new_items_to_notify[i:i + MAX_BUBBLES_PER_MSG] for i in range(0, len(new_items_to_notify), MAX_BUBBLES_PER_MSG)]
     flex_messages = []
     
@@ -443,7 +460,7 @@ def main():
             img_url = pre_img_url
             price_text = None
             
-            if link:
+            if link and 'pid=' in link:
                 time.sleep(1) 
                 fetched_img, fetched_price = fetch_product_details(link)
                 if not img_url:
@@ -475,7 +492,6 @@ def main():
         now_str = datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')
         print(f"[{now_str} JST] ★全登録者へ 計{len(new_items_to_notify)}件（{len(flex_messages)}吹き出し）を正常送信しました。")
         
-        # 送信に成功したため個別の全キーをDBに保存
         mark_as_seen(all_keys_to_mark)
 
     except Exception as e:
