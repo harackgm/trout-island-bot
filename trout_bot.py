@@ -282,7 +282,6 @@ def create_flex_bubble(title, link, img_url, keyword, price_text=None):
     elif "予約" in keyword or "店頭" in keyword or "予告" in keyword:
         keyword_color = "#FF69B4"
 
-    # ★変更: 画像がない場合、店頭販売ならwelcome画像、それ以外はNo Imageを適用
     if not img_url:
         if "店頭" in keyword:
             img_url = WELCOME_IMAGE_URL
@@ -332,19 +331,20 @@ def create_flex_bubble(title, link, img_url, keyword, price_text=None):
             "type": "image",
             "url": img_url,
             "size": "full",
-            "aspectRatio": "4:3",  # ★変更: 画像比率を4:3に統一
+            "aspectRatio": "4:3",
             "aspectMode": "cover"
         }
-        # リンクが存在し、トップページ以外ならタップアクションを追加
-        if link and link != TARGET_URL:
+        # ★変更: トップページ行きであっても画像をタップ可能にする
+        if link:
             hero_section["action"] = {
                 "type": "uri",
                 "uri": link
             }
         bubble["hero"] = hero_section
 
-    # リンクが存在し、トップページ以外の個別商品リンクの場合のみボタンを表示
-    if link and link != TARGET_URL:
+    # ★変更: トップページ行きであってもボタンを表示し、ラベルを出し分ける
+    if link:
+        button_label = "ショップを見る" if link == TARGET_URL else "詳細を見る"
         bubble["footer"] = {
             "type": "box",
             "layout": "vertical",
@@ -357,7 +357,7 @@ def create_flex_bubble(title, link, img_url, keyword, price_text=None):
                     "height": "sm",
                     "action": {
                         "type": "uri",
-                        "label": "詳細を見る",
+                        "label": button_label,
                         "uri": link
                     }
                 }
