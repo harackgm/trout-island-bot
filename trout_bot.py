@@ -16,6 +16,7 @@ from linebot.v3.messaging import (
     ApiClient,
     MessagingApi,
     BroadcastRequest,
+    PushMessageRequest,
     FlexMessage,
     FlexContainer
 )
@@ -23,19 +24,21 @@ from linebot.v3.messaging import (
 # ==========================================
 # ★本番自動監視モード設定（カルーセル分割＆安全ストッパー作動）
 # ==========================================
-TEST_MODE = False
+# ★変更: テストモードをTrueに変更。管理者のみに通知されます。
+TEST_MODE = True
 MAX_NOTIFY_LIMIT = 15       # 異常時ストッパー：16件以上の新着は送信スキップ
 MAX_BUBBLES_PER_MSG = 5     # 1つの吹き出し(カルーセル)に入れる最大件数
 
-# ★追加: 代替画像URLの設定
 DEFAULT_IMAGE_URL = "https://placehold.jp/333333/ffffff/400x300.png?text=No%20Image"
-# ★追加: 店頭販売用の専用画像URL（GitHubのRawリンク）
 WELCOME_IMAGE_URL = "https://raw.githubusercontent.com/harackgm/trout-island-bot/main/welcome.jpg"
 
 # 日本時間(JST)の定義
 JST = timezone(timedelta(hours=9))
 
 CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN', '').strip()
+# ★追加: テスト送信用に管理者のLINEユーザーIDを取得
+ADMIN_LINE_USER_ID = os.environ.get('ADMIN_LINE_USER_ID', '').strip()
+
 TARGET_URL = "https://troutisland.shop-pro.jp/"
 SALE_URL = "http://troutisland.shop-pro.jp/?mode=cate&cbid=1923704&csid=0"
 DB_FILE = "products.db"
@@ -332,9 +335,9 @@ def create_flex_bubble(title, link, img_url, keyword, price_text=None):
             "url": img_url,
             "size": "full",
             "aspectRatio": "4:3",
-            "aspectMode": "cover"
+            "aspectMode": "fit",      # ★変更: coverからfitに変更し画像全体を表示
+            "backgroundColor": "#FFFFFF" # ★追加: 余白を白色にして額縁のようにする
         }
-        # ★変更: トップページ行きであっても画像をタップ可能にする
         if link:
             hero_section["action"] = {
                 "type": "uri",
@@ -342,7 +345,6 @@ def create_flex_bubble(title, link, img_url, keyword, price_text=None):
             }
         bubble["hero"] = hero_section
 
-    # ★変更: トップページ行きであってもボタンを表示し、ラベルを出し分ける
     if link:
         button_label = "ショップを見る" if link == TARGET_URL else "詳細を見る"
         bubble["footer"] = {
@@ -486,12 +488,23 @@ def main():
     try:
         with ApiClient(configuration) as api_client:
             line_bot_api = MessagingApi(api_client)
-            broadcast_request = BroadcastRequest(messages=flex_messages)
-            line_bot_api.broadcast(broadcast_request)
+            
+            # ★変更: TEST_MODE時の分岐処理（管理者のみに通知）
+            now_str = datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')
+            if TEST_MODE:
+                if not ADMIN_LINE_USER_ID:
+                    print("エラー: テストモードですが ADMIN_LINE_USER_ID が設定されていません。")
+                    sys.exit(1)
+                
+                push_request = PushMessageRequest(to=ADMIN_LINE_USER_ID, messages=flex_messages)
+                line_bot_api.push_message(push_request)
+                print(f"[{now_str} JST] ★【テスト通知】管理者のみに 計{len(new_items_to_notify)}件（{len(flex_messages)}吹き出し）を正常送信しました。")
+            else:
+                broadcast_request = BroadcastRequest(messages=flex_messages)
+                line_bot_api.broadcast(broadcast_request)
+                print(f"[{now_str} JST] ★全登録者へ 計{len(new_items_to_notify)}件（{len(flex_messages)}吹き出し）を正常送信しました。")
         
-        now_str = datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')
-        print(f"[{now_str} JST] ★全登録者へ 計{len(new_items_to_notify)}件（{len(flex_messages)}吹き出し）を正常送信しました。")
-        
+        # テスト通知でもDBは更新し、次回の重複通知を防ぐ安全仕様
         mark_as_seen(all_keys_to_mark)
 
     except Exception as e:
