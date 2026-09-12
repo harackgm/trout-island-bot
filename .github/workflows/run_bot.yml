@@ -1,38 +1,38 @@
 name: Trout Island Watcher
 
 on:
-  # 外部（Cronjobs等）からの手動・API実行のみを受け付ける
+  repository_dispatch:
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
-      contents: write  # DBファイルの書き込み権限
+      contents: write
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
+    - name: Checkout repository
+      uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.x'
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install requests beautifulsoup4 line-bot-sdk
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
 
-      - name: Run Trout Island Bot
-        env:
-          LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
-        run: python trout_bot.py
+    - name: Run Trout Island Bot
+      env:
+        LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
+        LINE_USER_ID: ${{ secrets.LINE_USER_ID }} # ← この行がPythonへの橋渡し役になります
+      run: python trout_bot.py
 
-      - name: Commit and push DB changes
-        run: |
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
-          git add products.db
-          git diff --staged --quiet || git commit -m "Auto-update DB"
-          git push
+    - name: Commit and push DB changes
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        git add products.db
+        git diff --quiet && git diff --staged --quiet || (git commit -m "Update DB" && git push)
