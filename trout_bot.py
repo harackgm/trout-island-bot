@@ -24,7 +24,8 @@ from linebot.v3.messaging import (
 # ==========================================
 # ★本番自動監視モード設定（カルーセル分割＆安全ストッパー作動）
 # ==========================================
-TEST_MODE = True            # 管理者のみへのテスト通知モード
+# ★変更: 本番運用（全員通知）に戻すため False に設定
+TEST_MODE = False
 MAX_NOTIFY_LIMIT = 15       # 異常時ストッパー：16件以上の新着は送信スキップ
 MAX_BUBBLES_PER_MSG = 5     # 1つの吹き出し(カルーセル)に入れる最大件数
 
@@ -35,7 +36,6 @@ WELCOME_IMAGE_URL = "https://raw.githubusercontent.com/harackgm/trout-island-bot
 JST = timezone(timedelta(hours=9))
 
 CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN', '').strip()
-# ★修正: GitHubのSecretsに登録されている名前「LINE_USER_ID」に合わせて変更
 ADMIN_LINE_USER_ID = os.environ.get('LINE_USER_ID', '').strip()
 
 TARGET_URL = "https://troutisland.shop-pro.jp/"
